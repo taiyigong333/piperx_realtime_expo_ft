@@ -1,0 +1,11 @@
+[project]
+name = "piperx-expo-client-env"
+version = "0.1.0"
+requires-python = ">=3.10,<3.11"
+dependencies = ["piperx-realtime-expo-ft", "taiyi-piper-x-collect[realsense]", "opencv-python<4.12"]
+
+[tool.uv.sources]
+piperx-realtime-expo-ft = { path = "..", editable = true }
+taiyi-piper-x-collect = { path = "../third_party/collector", editable = true }
+pyAgxArm = { path = "../third_party/collector/pyAgxArm", editable = true }
+openpi-client = { path = "../third_party/openpi/packages/openpi-client", editable = true }

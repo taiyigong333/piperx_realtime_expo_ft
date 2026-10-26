@@ -1,0 +1,17 @@
+[project]
+name = "piperx-expo-server-env"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = ["piperx-realtime-expo-ft", "expo-ft", "piperx-to-openpi-vla", "opencv-python<4.12"]
+
+[tool.uv]
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "datasets>=3,<4"]
+
+[tool.uv.sources]
+piperx-realtime-expo-ft = { path = "..", editable = true }
+expo-ft = { path = "../third_party/expo", editable = true }
+openpi = { path = "../third_party/openpi", editable = true }
+openpi-client = { path = "../third_party/openpi/packages/openpi-client", editable = true }
+piperx-to-openpi-vla = { path = "../third_party/converter", editable = true }
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
+dlimp = { git = "https://github.com/kvablack/dlimp", rev = "ad72ce3a9b414db2185bc0b38461d4101a65477a" }
