@@ -31,6 +31,8 @@ docs/                    # 架构、操作说明、实验计划、交接
 
 ## 安装与模拟验证
 
+下面是4090上的完整开发验证；piperx只需 `bash scripts/setup.sh client`，不要安装服务器GPU环境。现场GitHub HTTPS不可用时使用 `PIPERX_GITHUB_SSH=1 bash scripts/setup.sh client`。
+
 ```bash
 cd /data/gcj_data/rl/real_time_expo_ft/code
 bash scripts/setup.sh core
