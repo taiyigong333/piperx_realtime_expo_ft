@@ -1,0 +1,21 @@
+# 部署在piperx；现场配置未完成时会明确拒绝运动。
+backend: piperx
+server_host: 192.168.50.2
+server_port: 8103
+language_instruction: grab the rotating red square
+control_hz: 30
+episode_steps: 200
+watchdog_s: 0.5
+rpc_timeout_s: null
+feedback_timeout_s: 0.2
+camera_timeout_s: 0.3
+collection_config: configs/local/collection.yaml
+workspace_m: null
+max_translation_step_m: 0.005
+max_rotation_step_rad: 0.05
+gripper_range_m: [0.0, 0.08]
+max_gripper_step_m: 0.005
+speed_percent: 10
+gripper_force_n: 1.0
+success_detector: null
+manual_reset: true

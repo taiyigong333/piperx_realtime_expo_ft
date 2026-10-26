@@ -1,0 +1,25 @@
+# 仅在4090启动；绑定有线接口，客户端使用192.168.50.2:8103。
+language_instruction: grab the rotating red square
+dataset_path: null
+base_weights: null
+rtc_weights: null
+eval_checkpoint_dir: null
+assets_dir: assets/piperx_pi05
+asset_id: piperx/rotating_square
+output_dir: checkpoints
+run_name: rotating_square_rtc_v1
+host: 192.168.50.2
+port: 8103
+seed: 42
+control_hz: 30
+episode_steps: 200
+replan_steps: 8
+delay: 5
+batch_size: 4
+max_steps: 4000
+num_data: 0
+checkpoint_interval: 1000
+offline_ratio: 0.0
+step_interval: 30
+wandb_mode: offline
+cuda_visible_devices: '0'

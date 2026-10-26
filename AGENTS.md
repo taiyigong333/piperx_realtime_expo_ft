@@ -1,7 +1,7 @@
 # 工程约定
 
 - 面向用户一律中文；重要注释解释单位、动作和硬件行为的原因。
-- 服务器工作目录 `/data/gcj_data/rl/real_time_expo_ft/code`。本轮未部署 piperx；不要默认两者是同一台机器。
+- 4090服务器目录 `/data/gcj_data/rl/real_time_expo_ft/code`；piperx客户端目录 `/home/cv/gcj/rl/baseline/realtime_expo_ft`。两台机器通过192.168.50.2/192.168.50.1的有线接口通信。
 - 外部代码使用 third_party 下 Git 子模块固定提交。先理解接口，尽量只修改 src/piperx_expo、配置、测试和文档。不要直接改上游算法。
 - 客户端 Python3.10（ROS/Pika兼容），服务器 Python3.11（JAX/OpenPI），根环境用于轻量测试。不要合并三个环境。
 - 动作是7维米制绝对法兰 XYZ+RPY 和夹爪宽度；禁止换成 DROID 速度或默认夹爪概率。
