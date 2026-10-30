@@ -6,8 +6,12 @@ import dataclasses
 CONFIG_NAME = "piperx_pi05_lora_absolute_rtc"
 
 
-def register():
+def register(experiment=None):
     from openpi.training import config
+
+    if experiment and experiment.get("checkpoint_profile") == "piper_delta_right_wrist":
+        from piperx_expo.server.checkpoint_config import register_checkpoint
+        return register_checkpoint(experiment)
 
     if CONFIG_NAME not in config._CONFIGS_DICT:
         base = config.get_config("expo_pi05_droid_lora_finetune_sft_cartesian_state")

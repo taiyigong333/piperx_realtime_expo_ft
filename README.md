@@ -2,7 +2,9 @@
 
 用于“抓取旋转红色方块”的复现工程：机器人客户端负责数据采集、相机与机械臂执行，GPU 服务器负责 pi0.5 推理、RTC-SFT 与 Real-Time EXPO-FT 更新。
 
-服务器位置：`gh4090piper:/data/gcj_data/rl/real_time_expo_ft/code`；客户端部署位置：`piperx:/home/cv/gcj/rl/baseline/realtime_expo_ft`。通过有线网192.168.50.2/192.168.50.1通信，部署步骤见[有线部署说明](docs/有线部署.md)。正式示教数据、模型权重尚待提供；当前验证软件与通信，不执行真机运动，不能据此认定论文实验复现完成。
+服务器位置：`gh4090piper:/data/gcj_data/rl/real_time_expo_ft/code`；客户端部署位置：`piperx:/home/cv/gcj/rl/baseline/realtime_expo_ft`。通过有线网192.168.50.2/192.168.50.1通信，部署步骤见[有线部署说明](docs/有线部署.md)。
+
+当前四批数据的30帧pi0.5 checkpoint接入与完整训练步骤，见 [Real-Time EXPO-FT完整训练流程](docs/Real-Time-EXPO-FT完整训练流程.md)。本次现场配置和已执行验证见 [真机RL配置执行记录](docs/真机RL配置执行记录.md)。已完成数据/模型接入与只读标定，尚未启动完整RTC-SFT或真实RL；下方原始示例保留用于从原始数据搭建新任务。
 
 ## 目录
 

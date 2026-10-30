@@ -5,7 +5,8 @@ requires-python = ">=3.11,<3.12"
 dependencies = ["piperx-realtime-expo-ft", "expo-ft", "piperx-to-openpi-vla", "opencv-python<4.12"]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "datasets>=3,<4"]
+# PyArrow26的wheel要求NumPy2；机器人/EXPO环境固定NumPy1，使用兼容版本。
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "datasets>=3,<4", "pyarrow==19.0.1"]
 
 [tool.uv.sources]
 piperx-realtime-expo-ft = { path = "..", editable = true }

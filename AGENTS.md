@@ -6,6 +6,7 @@
 - 客户端 Python3.10（ROS/Pika兼容），服务器 Python3.11（JAX/OpenPI），根环境用于轻量测试。不要合并三个环境。
 - 动作是7维米制绝对法兰 XYZ+RPY 和夹爪宽度；禁止换成 DROID 速度或默认夹爪概率。
 - 数据、权重、密钥、虚拟环境、运行日志不提交。私钥只在主仓库本地 core.sshCommand 中引用。
+- 使用Git维护项目：每完成一项可独立复核的阶段性修改并通过相应验证，及时提交并推送到远程仓库；结束工作前检查状态并报告提交/推送结果。推送前先核对远程更新，不使用强制推送。双机同步同一提交，保留被忽略的现场配置与运行产物。
 - 环境统一使用 uv sync/uv run 管理，不使用 pip/conda 混装。三个 uv.lock 应提交；运行使用 --locked。
 - 改控制/数据流时运行 `uv run --locked python -m pytest -q` 和 `uv run --locked python scripts/smoke_rpc.py`；训练依赖变更时运行 `uv run --project server --locked python scripts/validate_server.py`。
 - 真实运动前必须完成原采集预检与现场配置。默认进行模拟/只读验证；成功检测、工作空间、数据/权重不得猜测。

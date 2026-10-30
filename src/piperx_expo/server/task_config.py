@@ -21,6 +21,6 @@ def get_config():
             "auto_reset_steps": experiment["episode_steps"],
             "example_action": np.zeros((1, 7), dtype=np.float32),
             "edit_action_xyzg": False,
-            "critic_camera_keys": ("base_0_rgb", "left_wrist_0_rgb"),
+            "critic_camera_keys": tuple(experiment.get("critic_camera_keys", ("base_0_rgb", "left_wrist_0_rgb"))),
         }
     )
