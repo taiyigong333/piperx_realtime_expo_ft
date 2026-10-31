@@ -195,6 +195,8 @@ def _install_rpc_contract(config):
     def create_env(self, request):
         spec = {key: config[key] for key in ("language_instruction", "control_hz", "episode_steps")}
         spec["action_mode"] = "absolute_pose_width_m"
+        if config.get("episode_review", False):
+            spec["review_protocol"] = "episode_review_v1"
         return original(self, {**request, "task_spec": spec})
 
     EnvClient.create_env = create_env
@@ -209,6 +211,7 @@ def _install_rpc_contract(config):
             self.network_ms += (time.monotonic() - start) * 1000
             if response.get("status") == "error":
                 raise RuntimeError(response.get("message", "客户端错误"))
+            self.last_response = response
             return response
         except Exception:
             self._close_connection()
@@ -246,7 +249,10 @@ def main():
     entry = {"sft": "train_offline_rtc.py", "rl": "train_pi_robo.py", "eval": "eval_droid_policy.py"}[
         args.stage
     ]
-    argv = [str(ROOT / "third_party/expo" / entry), *build_args(config, args.stage), *extra]
+    entry_path = ROOT / "third_party/expo" / entry
+    if args.stage == "rl" and config.get("episode_review", False):
+        entry_path = ROOT / "src/piperx_expo/server/review_train.py"
+    argv = [str(entry_path), *build_args(config, args.stage), *extra]
     if args.resume and args.stage != "eval":
         argv.append("--resume=True")
     if args.dry_run:

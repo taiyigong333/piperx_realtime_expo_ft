@@ -24,7 +24,7 @@ class MockDevices:
     def read_state(self):
         return self.state.copy()
 
-    def reset(self):
+    def reset(self, confirmed=False):
         if self.stopped:
             raise RuntimeError("设备已停止，需要重新创建会话")
         self.state = self.initial.copy()
@@ -116,9 +116,9 @@ class PiperXDevices:
             self.read_state(), {k: v[1] for k, v in frames.items()}, self.config["language_instruction"]
         )
 
-    def reset(self):
+    def reset(self, confirmed=False):
         # 每个 episode 由现场人员复位，不复用 DROID 的自动抛放动作。
-        answer = input("请人工复位方块/机械臂并确认周围安全，输入 READY 继续：")
+        answer = "READY" if confirmed else input("请人工复位方块/机械臂并确认周围安全，输入 READY 继续：")
         if answer != "READY":
             raise RuntimeError("现场复位未确认")
         deadline = time.monotonic() + 5

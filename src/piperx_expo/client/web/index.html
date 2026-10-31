@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="expo-token" content="__EXPO_TOKEN__" />
+    <title>EXPO · 真机训练工作台</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="EXPO首页"
+        ><span class="brandmark">E<span>↗</span></span>
+        <div>EXPO<span class="brand-sub">ROBOT LEARNING</span></div></a
+      >
+      <div class="workspace-label">工作空间</div>
+      <nav>
+        <button class="nav active" data-view="run">
+          <span>◈</span>运行工作台</button
+        ><button class="nav" data-view="history">
+          <span>≋</span>轨迹档案 <b id="history-count">0</b></button
+        ><button class="nav" data-view="settings">
+          <span>⚙</span>会话参数
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="connection-dot"></span>本机控制界面<small
+          >REAL-TIME EXPO-FT / PIPER-X</small
+        >
+      </div>
+    </aside>
+    <div class="app">
+      <header>
+        <div class="breadcrumb">机器人学习 <span>/</span> 在线强化学习</div>
+        <div class="header-right">
+          <span id="mode" class="badge">模拟环境</span
+          ><span class="connection-dot" id="connection-dot"></span
+          ><span id="connection">未连接</span><span class="avatar">PX</span>
+        </div>
+      </header>
+      <main>
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">ROLLOUT & REVIEW</div>
+            <h1 id="page-title">
+              训练，从每一条轨迹开始<span class="title-dot">.</span>
+            </h1>
+            <p id="subtitle">观察执行，复核结果，让每次尝试成为可靠的经验。</p>
+          </div>
+          <button id="stop" class="button danger-outline">■ 停止并锁定</button>
+        </div>
+        <div id="notice" class="notice" role="status" aria-live="polite"></div>
+        <section id="view-run" class="view">
+          <div class="session-strip">
+            <div>
+              <span class="label">当前阶段</span
+              ><strong id="phase">准备就绪</strong>
+            </div>
+            <div>
+              <span class="label">轨迹步数</span
+              ><strong
+                ><span id="steps">0</span
+                ><span class="muted">
+                  / <span id="budget">200</span></span
+                ></strong
+              >
+            </div>
+            <div>
+              <span class="label">控制频率</span
+              ><strong id="hz">30 <small>Hz</small></strong>
+            </div>
+            <div>
+              <span class="label">任务</span
+              ><strong class="task" id="task"
+                >grab the rotating red square</strong
+              >
+            </div>
+            <div class="progress"><div id="progress-bar"></div></div>
+          </div>
+          <div class="work-grid">
+            <div class="primary">
+              <div class="camera-grid">
+                <article class="card camera">
+                  <div class="card-title">
+                    <span><i class="dot teal"></i>前视相机</span
+                    ><span class="mono">FRONT / RGB</span>
+                  </div>
+                  <div class="image-wrap">
+                    <img id="camera-0" alt="前视相机画面" />
+                    <div class="camera-empty">
+                      等待采集画面<span>连接后在此预览</span>
+                    </div>
+                    <span class="camera-tag">224 × 224</span>
+                  </div>
+                </article>
+                <article class="card camera">
+                  <div class="card-title">
+                    <span><i class="dot teal"></i>右腕相机</span
+                    ><span class="mono">WRIST / RGB</span>
+                  </div>
+                  <div class="image-wrap">
+                    <img id="camera-1" alt="右腕相机画面" />
+                    <div class="camera-empty">
+                      等待采集画面<span>连接后在此预览</span>
+                    </div>
+                    <span class="camera-tag">224 × 224</span>
+                  </div>
+                </article>
+              </div>
+              <article class="card plot-card">
+                <div class="card-title">
+                  <span>轨迹与夹爪</span
+                  ><span class="legend"
+                    ><i class="dot teal"></i>X <i class="dot blue"></i>Y
+                    <i class="dot amber"></i>Z
+                    <i class="dot purple"></i>夹爪</span
+                  >
+                </div>
+                <canvas
+                  id="trajectory"
+                  aria-label="轨迹位置和夹爪宽度曲线"
+                ></canvas>
+                <div class="plot-foot">
+                  <span>实测状态 · 位置 m / 夹爪 mm</span
+                  ><span id="state-text" class="mono">等待观测</span>
+                </div>
+                <div class="playback">
+                  <button id="live" class="text-button">返回实时</button
+                  ><input
+                    type="range"
+                    id="scrubber"
+                    min="0"
+                    max="0"
+                    value="0"
+                    aria-label="轨迹回放帧"
+                  /><span id="frame-label" class="mono">LIVE</span>
+                </div>
+              </article>
+              <div class="session-actions card">
+                <div>
+                  <strong id="action-title">准备开始采集</strong
+                  ><span id="action-hint"
+                    >先启动复核模式服务器，再连接客户端。</span
+                  >
+                </div>
+                <div class="action-buttons">
+                  <button class="button secondary" id="demo">模拟体验</button
+                  ><button class="button primary" id="start">
+                    连接学习器 →</button
+                  ><button class="button primary" id="ready" hidden>
+                    已复位，开始下一条 →</button
+                  ><button class="button secondary" id="end" hidden>
+                    结束本条并复核
+                  </button>
+                </div>
+              </div>
+              <label id="motion-label" class="motion-confirm" hidden
+                ><input
+                  type="checkbox"
+                  id="motion-confirm"
+                />已完成现场预检、复位并确认允许真机运动</label
+              >
+            </div>
+            <aside class="review-column">
+              <article class="card review-card">
+                <div class="card-title">
+                  <span>回合复核</span
+                  ><span class="badge subtle" id="review-badge">等待轨迹</span>
+                </div>
+                <div class="auto-result" id="auto-result">
+                  <div class="result-icon">◎</div>
+                  <strong id="auto-title">尚无判定结果</strong
+                  ><span id="auto-hint">轨迹结束后显示自动检测结果</span>
+                </div>
+                <div class="divider"></div>
+                <form id="review-form">
+                  <fieldset id="review-fields" disabled>
+                    <legend>最终结果 <span>人工标记优先</span></legend>
+                    <div class="segmented">
+                      <label
+                        ><input
+                          type="radio"
+                          name="manual"
+                          value="auto"
+                          checked
+                        /><span>自动</span></label
+                      ><label
+                        ><input
+                          type="radio"
+                          name="manual"
+                          value="success"
+                        /><span>✓ 成功</span></label
+                      ><label
+                        ><input
+                          type="radio"
+                          name="manual"
+                          value="failure"
+                        /><span>× 失败</span></label
+                      >
+                    </div>
+                    <label class="admit"
+                      ><input type="checkbox" id="admitted" checked /><span
+                        ><strong>加入训练经验</strong
+                        ><small>取消后仅保留本地档案</small></span
+                      ></label
+                    ><label class="note-label" for="note"
+                      >复核备注 <span>可选</span></label
+                    ><textarea
+                      id="note"
+                      rows="3"
+                      maxlength="2000"
+                      placeholder="例如：夹住后滑落，修正为失败"
+                    ></textarea
+                    ><button class="button primary full" type="submit">
+                      确认并提交复核 →
+                    </button>
+                  </fieldset>
+                </form>
+                <p class="review-foot" id="ack-hint">
+                  提交前不会写入学习器经验池。
+                </p>
+              </article>
+              <article class="protocol-card">
+                <div class="eyebrow">A RELIABLE LOOP</div>
+                <h3>采集 → 复核 → 学习</h3>
+                <p>
+                  自动判断保留原始结果；人工标签决定最终奖励。只有确认收录的轨迹才参与更新。
+                </p>
+                <a href="#settings" id="open-settings">调整下一条轨迹参数 ↗</a>
+              </article>
+            </aside>
+          </div>
+          <article class="card recent">
+            <div class="card-title">
+              <span>最近轨迹</span
+              ><button class="text-button" id="all-history">查看全部 ↗</button>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>采集时间 / 轨迹</th>
+                    <th>步数</th>
+                    <th>自动判定</th>
+                    <th>人工标记</th>
+                    <th>经验状态</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="recent-body"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+        <section id="view-history" class="view" hidden>
+          <article class="card">
+            <div class="card-title">
+              <span>轨迹档案</span
+              ><span class="muted">点击回放，在工作台查看双相机与状态曲线</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>采集时间 / 轨迹</th>
+                    <th>步数</th>
+                    <th>自动判定</th>
+                    <th>人工标记</th>
+                    <th>经验状态</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="history-body"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+        <section id="view-settings" class="view" hidden>
+          <div class="settings-grid">
+            <article class="card settings-card">
+              <h2>采集与连接</h2>
+              <p class="muted">
+                最大步数在下一条轨迹复位后生效；连接地址在启动前设置。
+              </p>
+              <form id="settings-form">
+                <label for="admission-mode"
+                  >经验收录模式 <span>下一条轨迹生效</span></label
+                ><select id="admission-mode">
+                  <option value="manual">逐条人工复核（默认）</option>
+                  <option value="auto">自动收录 · 使用自动判定</option>
+                </select>
+                <p class="field-help">
+                  自动收录完成后立即回传确认并入池。需要人工修正或拒收时，请提前选择逐条复核。
+                </p>
+                <label for="max-steps"
+                  >每条轨迹最大步数 <span>1 – 2000 步</span></label
+                ><input
+                  id="max-steps"
+                  type="number"
+                  min="1"
+                  max="2000"
+                  step="1"
+                  required
+                />
+                <p class="field-help">
+                  到达上限后停止执行，按收录模式处理结果；下一条仍需确认复位。
+                </p>
+                <label for="server-host">学习器地址</label
+                ><input id="server-host" type="text" required /><label
+                  for="server-port"
+                  >端口</label
+                ><input
+                  id="server-port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  required
+                /><button type="submit" class="button primary">保存参数</button>
+              </form>
+            </article>
+            <article class="card settings-card">
+              <h2>现场判定与控制约定</h2>
+              <p class="muted">以下设置来自现场配置，仅供查看。</p>
+              <dl id="detector-details"></dl>
+              <div class="settings-tip">
+                动作：7维绝对法兰 XYZ + RPY +
+                夹爪宽度。位置和夹爪使用米，角度使用弧度。工作空间和动作步长限制由客户端配置约束。
+              </div>
+              <div class="settings-tip">
+                命令行入口继续可用：scripts/client.sh 和
+                scripts/server.sh。浏览器复核模式使用独立服务器配置。
+              </div>
+            </article>
+          </div>
+        </section>
+        <footer>
+          <span>EXPO WORKBENCH <span class="muted">/ 本地轨迹复核</span></span
+          ><span>每条轨迹，都有据可查。</span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

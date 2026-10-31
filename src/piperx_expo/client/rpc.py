@@ -27,6 +27,8 @@ class Dispatcher:
         operation = request["operation"]
         if operation == "create_env":
             spec = request.get("task_spec")
+            if spec and spec.get("review_protocol"):
+                raise ValueError("复核服务器需要浏览器客户端；原命令行请使用原服务器配置")
             if spec is None and self.config["backend"] == "piperx":
                 raise ValueError("真实客户端要求使用本项目服务器启动器完成任务协议核对")
             if spec is not None:
@@ -74,20 +76,28 @@ class Dispatcher:
             self.env = None
 
 
-def run_client(config, allow_motion=False, max_requests=None):
-    dispatcher = Dispatcher(config, allow_motion)
+def run_client(config, allow_motion=False, max_requests=None, *, dispatcher=None, stop_event=None,
+               on_connection=None):
+    dispatcher = dispatcher or Dispatcher(config, allow_motion)
     requests = 0
     uri = f"ws://{config['server_host']}:{config['server_port']}"
     try:
         # 只在首次连接时重试。已连接后断线必须停止设备并退出，避免重发不确定动作。
         while True:
+            if stop_event is not None and stop_event.is_set():
+                return
             try:
                 connection = connect(uri, compression=None, max_size=None, open_timeout=5)
                 break
             except OSError:
                 LOG.info("等待模型服务器 %s", uri)
-                time.sleep(2)
+                if stop_event is None:
+                    time.sleep(2)
+                else:
+                    stop_event.wait(2)
         with connection:
+            if on_connection is not None:
+                on_connection(connection)
             connection.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             LOG.info("客户端已连接 %s，backend=%s", uri, config["backend"])
             while max_requests is None or requests < max_requests:

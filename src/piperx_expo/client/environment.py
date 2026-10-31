@@ -10,8 +10,9 @@ from piperx_expo.client.safety import validate_action, validate_client_config
 
 
 class PiperXEnv:
-    def __init__(self, config: dict, allow_motion=False, device=None):
+    def __init__(self, config: dict, allow_motion=False, device=None, reset_confirm=None):
         self.config = config
+        self.reset_confirm = reset_confirm
         self.real = config["backend"] == "piperx"
         self.boot_placeholder_pending = self.real
         if config["backend"] not in {"mock", "piperx"}:
@@ -50,11 +51,19 @@ class PiperXEnv:
                     self.device.stop_hold()
 
     def reset(self):
+        # 人工等待不能持控制锁，否则停止按钮会被复位对话阻塞。
+        if self.reset_confirm is not None:
+            self.reset_confirm()
         with self.lock:
+            if self.closed.is_set():
+                raise RuntimeError("设备已关闭，需要重启客户端")
             if self.fault:
                 raise RuntimeError("看门狗/控制错误已停止设备，需要现场检查后重启客户端")
             self.armed = False
-            self.device.reset()
+            if self.reset_confirm is None:
+                self.device.reset()
+            else:
+                self.device.reset(confirmed=True)
             self.steps = 0
             self.last_action = None
             if hasattr(self.detector, "reset"):
@@ -67,6 +76,8 @@ class PiperXEnv:
 
     def step(self, action):
         with self.lock:
+            if self.closed.is_set():
+                raise RuntimeError("设备已关闭，需要重启客户端")
             if self.fault:
                 raise RuntimeError("设备已停止，需要重启客户端")
             if self.terminal:
@@ -111,6 +122,8 @@ class PiperXEnv:
         return self.last_info
 
     def close(self):
+        if self.closed.is_set():
+            return
         self.closed.set()
         with self.lock:
             self.armed = False
