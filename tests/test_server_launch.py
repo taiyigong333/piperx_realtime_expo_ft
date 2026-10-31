@@ -8,19 +8,22 @@ from piperx_expo.server.launch import _install_checkpoint_init, _install_local_l
 
 
 def test_wandb_credentials_are_scoped_assignments(monkeypatch, tmp_path):
-    for key in ("WANDB_API_KEY", "WANDB_ENTITY", "WANDB_MODE", "WANDB_BASE_URL"):
+    for key in ("WANDB_API_KEY", "WANDB_ENTITY", "WANDB_MODE", "WANDB_BASE_URL",
+                "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         monkeypatch.delenv(key, raising=False)
     path = tmp_path / "wandb.env"
     marker = tmp_path / "must-not-execute"
     path.write_text(f"export WANDB_API_KEY='test-credential'\nexport WANDB_ENTITY=old-team\n"
                     f"export WANDB_MODE=offline\ntouch {marker}\n")
     config = {"wandb_mode": "online", "wandb_env_file": str(path), "wandb_entity": "requested-team",
-              "wandb_base_url": "https://api.wandb.ai"}
+              "wandb_base_url": "https://api.wandb.ai", "wandb_proxy_url": "http://127.0.0.1:17890"}
     _load_wandb_environment(config)
     import os
     assert os.environ["WANDB_API_KEY"] == "test-credential"
     assert os.environ["WANDB_ENTITY"] == "requested-team"
     assert os.environ["WANDB_BASE_URL"] == "https://api.wandb.ai"
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        assert os.environ[key] == "http://127.0.0.1:17890"
     assert "WANDB_MODE" not in os.environ and not marker.exists()
     monkeypatch.setenv("WANDB_API_KEY", "existing-credential")
     _load_wandb_environment(config)

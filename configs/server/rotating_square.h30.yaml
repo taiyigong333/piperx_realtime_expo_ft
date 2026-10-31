@@ -28,6 +28,8 @@ step_interval: 30
 wandb_mode: online
 wandb_entity: gongcj-beijing
 wandb_base_url: https://api.wandb.ai
+# 本任务独立代理；原共享7890/7891与节点选择保持不变。
+wandb_proxy_url: http://127.0.0.1:17890
 # 复用此前pi0.5训练的本机凭据；仅引用路径，不复制密钥，不提交此文件。
 wandb_env_file: /data/gcj_data/fast/baseline/openpi/.wandb_env
 cuda_visible_devices: '0'

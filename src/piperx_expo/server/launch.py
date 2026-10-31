@@ -166,6 +166,10 @@ def _load_wandb_environment(config):
         os.environ["WANDB_ENTITY"] = config["wandb_entity"]
     if config.get("wandb_base_url"):
         os.environ["WANDB_BASE_URL"] = config["wandb_base_url"]
+    if config.get("wandb_proxy_url"):
+        # 仅影响当前训练进程；不切换服务器共享Clash的节点或全局代理配置。
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ[key] = config["wandb_proxy_url"]
 
 
 def _install_rpc_contract(config):
