@@ -12,6 +12,7 @@ from piperx_expo.config import ROOT, load_config, resolve_path
 
 
 def validate(config, stage):
+    batch_size = config.get("rl_batch_size", config["batch_size"]) if stage == "rl" else config["batch_size"]
     for key in ("dataset_path", "base_weights" if stage == "sft" else "rtc_weights"):
         if not config.get(key):
             raise ValueError(f"请填写 {key}，目前数据/权重尚未提供")
@@ -22,8 +23,8 @@ def validate(config, stage):
         raise ValueError("要求 action_horizon >= 2 * replan_steps，给RTC前缀与执行窗口保留空间")
     if not 0 <= config["delay"] <= config["replan_steps"]:
         raise ValueError("delay 必须在 [0,replan_steps] 内")
-    if config["batch_size"] < 1 or config["max_steps"] < 1 or (
-        stage != "sft" and config["max_steps"] < config["batch_size"]
+    if batch_size < 1 or config["max_steps"] < 1 or (
+        stage != "sft" and config["max_steps"] < batch_size
     ):
         raise ValueError("max_steps/batch_size 不合法")
     dataset = resolve_path(config["dataset_path"])
@@ -59,6 +60,7 @@ def validate(config, stage):
 
 
 def build_args(config, stage):
+    batch_size = config.get("rl_batch_size", config["batch_size"]) if stage == "rl" else config["batch_size"]
     package = ROOT / "src/piperx_expo/server"
     args = [
         f"--config_task={package / 'task_config.py'}",
@@ -78,7 +80,7 @@ def build_args(config, stage):
     else:
         args.extend(
             [
-                f"--batch_size={config['batch_size']}",
+                f"--batch_size={batch_size}",
                 f"--max_steps={config['max_steps']}",
                 "--project_name=piperx_realtime_expo_ft",
                 f"--run_name={config['run_name']}_{stage}",

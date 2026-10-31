@@ -73,6 +73,8 @@ def test_sft_update_budget_is_independent_of_batch_size(tmp_path):
     # RL的max_steps同时决定回放容量，仍不能小于所需batch。
     with pytest.raises(ValueError, match="max_steps/batch_size"):
         validate(config, "rl")
+    config["rl_batch_size"] = 4
+    validate(config, "rl")
 
 
 def test_new_empty_checkpoint_allowed_existing_data_preserved(monkeypatch, tmp_path):
