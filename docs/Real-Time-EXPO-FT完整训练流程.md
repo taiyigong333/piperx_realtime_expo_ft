@@ -169,13 +169,13 @@ bash scripts/server.sh sft --config configs/server/rotating_square.h30.yaml
 tmux attach -t expo_rtc_sft
 ```
 
-本配置batch=4、4000次离线梯度更新，每2000步保存。4000是初始计划，不是已验证的最优步数；依据留出轨迹、loss、推理和现场表现决定训练长度，修改时同步更新run_name及后续权重路径。
+本配置RTC-SFT batch=32（后续RL另设为4）、4000次离线梯度更新，每2000步保存。4000是初始计划，不是已验证的最优步数；依据留出轨迹、loss、推理和现场表现决定训练长度，修改时同步更新run_name及后续权重路径。
 
 主要产物：
 
 ```text
 /data/gcj_data/rl/real_time_expo_ft/runs/
-  rotating_square_h30_20261030_sft/
+  rotating_square_h30_b32_20261031_sft/
     metrics.jsonl
     checkpoints/2000/...
     checkpoints/4000/params
@@ -185,7 +185,7 @@ tmux attach -t expo_rtc_sft
 
 当前正式配置启用W&B在线记录，终端和metrics.jsonl同时记录loss/lr。启动器引用服务器已有`/data/gcj_data/fast/baseline/openpi/.wandb_env`中的凭据，不执行该文件里的shell命令、不复制密钥到项目。项目为`gongcj-beijing/piperx_realtime_expo_ft`，运行名称带`_sft`后缀；W&B随训练自动初始化，无需另开服务。恢复同一离线训练run：
 
-2026-10-31服务器连通性验证仍返回HTTP403，尚未验证在线上传；应先按[快速开始](真机强化学习快速开始.md)中的认证检查排查可用网络/代理，再开始正式训练。配置不会静默改成offline。
+2026-10-31已通过本任务独立代理17890修复原线路的HTTP403，旧凭据验证有效，正式RTC-SFT已在tmux中启动并建立W&B在线run；随后经batch16/32实测选定32，新run为rotating_square_h30_b32_20261031_sft（W&B ek9lzkgs）。详情与代理恢复方式见[本次训练记录](RTC-SFT训练记录_20261031.md)；不要重复启动已有训练。配置不会静默改成offline。
 
 ```bash
 bash scripts/server.sh sft --config configs/server/rotating_square.h30.yaml --resume
@@ -308,7 +308,7 @@ bash scripts/client.sh \
 在线产物：
 
 ```text
-/data/gcj_data/rl/real_time_expo_ft/runs/rotating_square_h30_20261030_rl/
+/data/gcj_data/rl/real_time_expo_ft/runs/rotating_square_h30_b32_20261031_rl/
   metrics.jsonl
   train_videos/
   checkpoints/<step>/agent/...
