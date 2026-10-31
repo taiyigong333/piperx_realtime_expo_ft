@@ -183,7 +183,9 @@ tmux attach -t expo_rtc_sft
 
 训练结束后确认最终保存成功且目录完整。配置中的 `rtc_weights` 预先指向上述 `4000/params`；**完成该阶段之前，这个路径不存在，RL启动器会拒绝运行。**若最终采用其他step，必须修改 `rtc_weights`。
 
-默认W&B离线，终端和metrics.jsonl记录loss/lr。恢复同一离线run：
+当前正式配置启用W&B在线记录，终端和metrics.jsonl同时记录loss/lr。启动器引用服务器已有`/data/gcj_data/fast/baseline/openpi/.wandb_env`中的凭据，不执行该文件里的shell命令、不复制密钥到项目。项目为`gongcj-beijing/piperx_realtime_expo_ft`，运行名称带`_sft`后缀；W&B随训练自动初始化，无需另开服务。恢复同一离线训练run：
+
+2026-10-31服务器连通性验证仍返回HTTP403，尚未验证在线上传；应先按[快速开始](真机强化学习快速开始.md)中的认证检查排查可用网络/代理，再开始正式训练。配置不会静默改成offline。
 
 ```bash
 bash scripts/server.sh sft --config configs/server/rotating_square.h30.yaml --resume
@@ -314,7 +316,7 @@ bash scripts/client.sh \
   checkpoints/buffers/<transition_step>.pkl
 ```
 
-关注 success/return、critic loss、actor loss、lr、动作拒绝、相机/CAN过期、网络与采样延迟，以及显存峰值。默认W&B离线；如需在线记录，在本地YAML设置wandb_mode=online并使用机器已有登录，不把密钥写进配置。
+关注 success/return、critic loss、actor loss、lr、动作拒绝、相机/CAN过期、网络与采样延迟，以及显存峰值。正式配置W&B在线记录，运行名称带`_rl`后缀；打开训练终端打印的运行链接查看曲线。终端和本地metrics.jsonl保留；凭据只引用服务器本机文件，不写入Git。旧的通用示例仍默认offline，启动本次实验应使用`rotating_square.h30.yaml`。
 
 RL保存的是完整学习器状态，`rtc_weights`只用于初次初始化VLA。恢复RL不能只提取其中VLA参数，否则critic、target、edit、优化器和replay状态会丢失。
 

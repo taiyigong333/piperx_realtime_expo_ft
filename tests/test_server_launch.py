@@ -4,7 +4,31 @@ import types
 
 import pytest
 
-from piperx_expo.server.launch import _install_checkpoint_init, _install_local_log
+from piperx_expo.server.launch import _install_checkpoint_init, _install_local_log, _load_wandb_environment
+
+
+def test_wandb_credentials_are_scoped_assignments(monkeypatch, tmp_path):
+    for key in ("WANDB_API_KEY", "WANDB_ENTITY", "WANDB_MODE", "WANDB_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / "wandb.env"
+    marker = tmp_path / "must-not-execute"
+    path.write_text(f"export WANDB_API_KEY='test-credential'\nexport WANDB_ENTITY=old-team\n"
+                    f"export WANDB_MODE=offline\ntouch {marker}\n")
+    config = {"wandb_mode": "online", "wandb_env_file": str(path), "wandb_entity": "requested-team",
+              "wandb_base_url": "https://api.wandb.ai"}
+    _load_wandb_environment(config)
+    import os
+    assert os.environ["WANDB_API_KEY"] == "test-credential"
+    assert os.environ["WANDB_ENTITY"] == "requested-team"
+    assert os.environ["WANDB_BASE_URL"] == "https://api.wandb.ai"
+    assert "WANDB_MODE" not in os.environ and not marker.exists()
+    monkeypatch.setenv("WANDB_API_KEY", "existing-credential")
+    _load_wandb_environment(config)
+    assert os.environ["WANDB_API_KEY"] == "existing-credential"
+
+
+def test_offline_wandb_does_not_require_credential_file():
+    _load_wandb_environment({"wandb_mode": "offline", "wandb_env_file": "/missing/wandb.env"})
 
 
 def test_local_metrics_hook_survives_wandb_init(monkeypatch, tmp_path):

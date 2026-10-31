@@ -146,6 +146,28 @@ def _install_local_log(config, stage):
     wandb.init = initialize
 
 
+def _load_wandb_environment(config):
+    import shlex
+
+    if config["wandb_mode"] != "online":
+        return
+    if config.get("wandb_env_file"):
+        # 只读取已有凭据文件中的白名单赋值，不执行shell，也不把密钥复制进项目。
+        for line in resolve_path(config["wandb_env_file"]).read_text().splitlines():
+            key, separator, value = line.strip().removeprefix("export ").strip().partition("=")
+            key = key.strip()
+            if separator and key in {"WANDB_API_KEY", "WANDB_ENTITY", "WANDB_BASE_URL"}:
+                parts = shlex.split(value, comments=True)
+                if len(parts) != 1:
+                    raise ValueError(f"W&B凭据文件中的 {key} 必须是单值赋值")
+                if not os.environ.get(key):
+                    os.environ[key] = parts[0]
+    if config.get("wandb_entity"):
+        os.environ["WANDB_ENTITY"] = config["wandb_entity"]
+    if config.get("wandb_base_url"):
+        os.environ["WANDB_BASE_URL"] = config["wandb_base_url"]
+
+
 def _install_rpc_contract(config):
     import time
     from expo_ft.env.env_client import EnvClient, EnvClientWrapper
@@ -224,6 +246,7 @@ def main():
         )
         return
     validate(config, args.stage)
+    _load_wandb_environment(config)
     os.environ.update(
         PIPERX_EXPERIMENT_CONFIG=str(resolve_path(args.config)),
         PIPERX_EXPO_STAGE=args.stage,
