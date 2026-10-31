@@ -52,6 +52,29 @@ def test_local_metrics_hook_survives_wandb_init(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
+def test_sft_update_budget_is_independent_of_batch_size(tmp_path):
+    import hashlib
+    from piperx_expo.server.launch import validate
+
+    dataset, assets = tmp_path / "data", tmp_path / "assets/test"
+    dataset.mkdir()
+    assets.mkdir(parents=True)
+    manifest = dataset / "manifest.json"
+    manifest.write_text(json.dumps({"action_mode": "absolute_pose_width_m", "confirmed_success": True,
+                                    "language_instruction": "test", "fps": 30}))
+    (assets / "norm_stats.json").write_text("{}")
+    (assets / "provenance.json").write_text(json.dumps({
+        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}))
+    config = {"dataset_path": str(dataset), "base_weights": str(tmp_path), "rtc_weights": str(tmp_path),
+              "replan_steps": 8, "action_horizon": 30, "delay": 5, "max_steps": 8, "batch_size": 32,
+              "assets_dir": str(tmp_path / "assets"), "asset_id": "test", "language_instruction": "test",
+              "control_hz": 30}
+    validate(config, "sft")
+    # RL的max_steps同时决定回放容量，仍不能小于所需batch。
+    with pytest.raises(ValueError, match="max_steps/batch_size"):
+        validate(config, "rl")
+
+
 def test_new_empty_checkpoint_allowed_existing_data_preserved(monkeypatch, tmp_path):
     package, agents = types.ModuleType("expo_ft"), types.ModuleType("expo_ft.agents")
 

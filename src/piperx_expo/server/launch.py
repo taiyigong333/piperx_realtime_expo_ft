@@ -22,7 +22,9 @@ def validate(config, stage):
         raise ValueError("要求 action_horizon >= 2 * replan_steps，给RTC前缀与执行窗口保留空间")
     if not 0 <= config["delay"] <= config["replan_steps"]:
         raise ValueError("delay 必须在 [0,replan_steps] 内")
-    if config["max_steps"] < config["batch_size"] or config["batch_size"] < 1:
+    if config["batch_size"] < 1 or config["max_steps"] < 1 or (
+        stage != "sft" and config["max_steps"] < config["batch_size"]
+    ):
         raise ValueError("max_steps/batch_size 不合法")
     dataset = resolve_path(config["dataset_path"])
     manifest = json.loads((dataset / "manifest.json").read_text())
@@ -82,7 +84,7 @@ def build_args(config, stage):
                 f"--run_name={config['run_name']}_{stage}",
                 f"--output_dir={resolve_path(config['output_dir'])}",
                 f"--checkpoint_interval={config['checkpoint_interval']}",
-                "--checkpoint_model=True",
+                f"--checkpoint_model={config.get('checkpoint_model', True)}",
             ]
         )
     if stage != "sft":
@@ -115,6 +117,15 @@ def _install_local_log(config, stage):
     original_init = wandb.init
 
     def log(data, *args, **kwargs):
+        if config.get("log_gpu_memory", False):
+            import jax
+
+            # 记录实际分配与峰值；nvidia-smi包含预分配池，不能单凭它判断batch余量。
+            stats = jax.devices()[0].memory_stats() or {}
+            data = dict(data)
+            for key in ("bytes_in_use", "peak_bytes_in_use", "bytes_limit"):
+                if key in stats:
+                    data[f"gpu/{key}"] = stats[key]
         scalars = {}
         for key, value in data.items():
             try:
@@ -256,7 +267,7 @@ def main():
         PIPERX_EXPO_STAGE=args.stage,
         CUDA_VISIBLE_DEVICES=str(config["cuda_visible_devices"]),
         WANDB_MODE=config["wandb_mode"],
-        XLA_PYTHON_CLIENT_MEM_FRACTION="0.85",
+        XLA_PYTHON_CLIENT_MEM_FRACTION=str(config.get("gpu_memory_fraction", 0.85)),
     )
     os.chdir(ROOT / "third_party/expo")
     sys.path.insert(0, str(ROOT / "third_party/expo"))
