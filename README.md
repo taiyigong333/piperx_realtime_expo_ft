@@ -1,5 +1,7 @@
 # Piper-X Real-Time EXPO-FT
 
+新会话接手请先阅读[当前HANDOFF](HANDOFF.md)，再按其中链接查阅历史记录与操作说明。
+
 用于“抓取旋转红色方块”的复现工程：机器人客户端负责数据采集、相机与机械臂执行，GPU 服务器负责 pi0.5 推理、RTC-SFT 与 Real-Time EXPO-FT 更新。
 
 服务器位置：`gh4090piper:/data/gcj_data/rl/real_time_expo_ft/code`；客户端部署位置：`piperx:/home/cv/gcj/rl/baseline/realtime_expo_ft`。通过有线网192.168.50.2/192.168.50.1通信，部署步骤见[有线部署说明](docs/有线部署.md)。

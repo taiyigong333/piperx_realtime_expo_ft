@@ -11,3 +11,4 @@
 - 改控制/数据流时运行 `uv run --locked python -m pytest -q` 和 `uv run --locked python scripts/smoke_rpc.py`；训练依赖变更时运行 `uv run --project server --locked python scripts/validate_server.py`。
 - 真实运动前必须完成原采集预检与现场配置。默认进行模拟/只读验证；成功检测、工作空间、数据/权重不得猜测。
 - docs/项目交接.md、docs/实验计划.md 及时维护。明确区分软件验证、GPU小算子更新、完整模型训练和真实机器人评估，不能互相替代。
+- 本地根目录 `HANDOFF.md` 作为新会话接手的当前状态快照，重要修改/实验/部署后及时更新；历史过程仍保留在 docs/项目交接.md。
