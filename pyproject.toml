@@ -7,7 +7,7 @@ name = "piperx-realtime-expo-ft"
 version = "0.1.0"
 description = "Piper-X 客户端与 Real-Time EXPO-FT GPU 学习器适配"
 requires-python = ">=3.10,<3.12"
-dependencies = ["numpy>=1.24,<2", "pillow>=10", "PyYAML>=6", "websockets~=13.1", "openpi-client", "h5py>=3.10"]
+dependencies = ["numpy>=1.24,<2", "pillow>=10", "PyYAML>=6", "websockets~=13.1", "openpi-client", "h5py>=3.10", "opencv-python<4.12"]
 
 [project.scripts]
 piperx-client = "piperx_expo.client.rpc:main"

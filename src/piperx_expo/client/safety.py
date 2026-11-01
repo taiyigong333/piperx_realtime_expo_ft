@@ -23,6 +23,9 @@ def validate_client_config(config: dict):
     if gripper.shape != (2,) or not np.isfinite(gripper).all() or not 0 <= gripper[0] < gripper[1]:
         raise ValueError("gripper_range_m 不合法")
     if config["backend"] == "piperx":
+        from piperx_expo.client.homing import load_home
+
+        load_home(config)  # 在创建CAN设备前检查固定归位配置。
         for key in ("feedback_timeout_s", "camera_timeout_s", "gripper_force_n"):
             if not np.isfinite(config[key]) or config[key] <= 0:
                 raise ValueError(f"{key} 必须是有限正数")

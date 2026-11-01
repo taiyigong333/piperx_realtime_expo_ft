@@ -32,6 +32,28 @@ def main():
     os.environ["PIPERX_EXPERIMENT_CONFIG"] = str(resolve_path(args.config))
     validate(experiment, "sft")
     train = register(experiment)
+    from piperx_expo.server import task_config
+    from expo_ft.agents.alg.realtime_expo_ft import RealTimeEXPOFTLearner
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    task = task_config.get_config()
+    assert task.action_space == "cartesian_position" and task.gripper_action_space == "position"
+    assert task.edit_action_xyzg == experiment.get("edit_action_xyzg", True)
+    # 调用固定上游真实掩码，而非仅检查配置值；基础VLA的RPY不受此掩码影响。
+    for option in (None, True, False):
+        sample_config = dict(experiment)
+        sample_config.pop("edit_action_xyzg", None)
+        if option is not None:
+            sample_config["edit_action_xyzg"] = option
+        with patch.object(task_config, "load_config", return_value=sample_config):
+            enabled = task_config.get_config().edit_action_xyzg
+        assert enabled == (option is not False)
+        sample_edits = np.ones((2, 56))
+        masked = RealTimeEXPOFTLearner._apply_edit_xyzg_mask(
+            SimpleNamespace(edit_action_xyzg=enabled, action_dim=7, replan_steps=8), sample_edits)
+        expected_mask = np.tile([1, 1, 1, 0, 0, 0, 1] if enabled else [1] * 7, 8)
+        np.testing.assert_array_equal(np.asarray(masked), sample_edits * expected_mask)
     train = dataclasses.replace(train, data=dataclasses.replace(train.data, assets=AssetsConfig(
         assets_dir=experiment["assets_dir"], asset_id=experiment["asset_id"])))
     data = train.data.create(train.assets_dirs, train.model)
@@ -96,6 +118,7 @@ def main():
     if missing or mismatched:
         raise ValueError(f"checkpoint不兼容：missing={missing}, shape_mismatch={mismatched}")
     report = {"result": "pass", "checkpoint": experiment["base_weights"],
+              "action_space": task.action_space, "edit_action_xyzg": task.edit_action_xyzg,
               "action_horizon": train.model.action_horizon, "checkpoint_parameter_leaves": len(loaded),
               "right_wrist": True, "absolute_delta_roundtrip": True, "rtc_prefix_reanchor": True,
               "scope": "真实checkpoint元数据形状、真实示教变换；未完整加载/训练VLA，未执行真机"}

@@ -20,7 +20,8 @@ def get_config():
             "control_hz": experiment["control_hz"],
             "auto_reset_steps": experiment["episode_steps"],
             "example_action": np.zeros((1, 7), dtype=np.float32),
-            "edit_action_xyzg": False,
+            # Dynamic Picking按论文只编辑XYZ/夹爪；旋转仍由基础VLA决定。
+            "edit_action_xyzg": experiment.get("edit_action_xyzg", True),
             "critic_camera_keys": tuple(experiment.get("critic_camera_keys", ("base_0_rgb", "left_wrist_0_rgb"))),
         }
     )

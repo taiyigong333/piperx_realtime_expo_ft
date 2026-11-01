@@ -1,15 +1,14 @@
 """把已确认成功的 Piper-X 正向轨迹写成 EXPO 回放，或调用原 LeRobot 转换器。"""
 
 import argparse
-import io
 import json
 import logging
 import os
 from pathlib import Path
 
 import h5py
+import cv2
 import numpy as np
-from PIL import Image
 
 from piperx_expo.observation import ACTION_NAMES, CAMERAS, make_observation
 
@@ -40,35 +39,43 @@ def _text(value):
 
 def read_state(file, times, max_alignment_age_s=0.1):
     puppet = file["puppet"]
+    names = ("end_effector_single_pose", "end_effector_single_position")
+    # 原转换器把两列对齐反馈作为一组选择；不能混用一列align、一列raw。
+    use_aligned = all(f"{name}_align" in puppet for name in names)
+    if use_aligned:
+        pose_group = puppet[f"{names[0]}_align"]
+        use_aligned = len(pose_group["data"]) == len(times) and len(pose_group["timestamp"]) == len(times)
     components = []
-    for name, width in (("end_effector_single_pose", 6), ("end_effector_single_position", 1)):
-        aligned = puppet.get(f"{name}_align")
-        values = None
-        if aligned is not None:
-            data, stamps = np.asarray(aligned["data"]), np.asarray(aligned["timestamp"])
-            if len(data) == len(times) and len(stamps) == len(times):
-                if np.max(np.abs(stamps - times)) <= max_alignment_age_s:
-                    values = data
-        if values is None:
-            raw = puppet[f"{name}_raw"]
-            stamps, indices = np.unique(np.asarray(raw["timestamp"]), return_index=True)
-            data = np.asarray(raw["data"])[indices]
+    raw_times = None
+    for name, width in zip(names, (6, 1)):
+        group = puppet[f"{name}_{'align' if use_aligned else 'raw'}"]
+        stamps, data = np.asarray(group["timestamp"]), np.asarray(group["data"])
+        data = data.reshape(-1, width)
+        if len(stamps) != len(data) or not np.isfinite(stamps).all():
+            raise ValueError(f"{name} 时间戳或长度无效")
+        if use_aligned:
+            if len(stamps) != len(times) or np.max(np.abs(stamps - times)) > max_alignment_age_s:
+                raise ValueError(f"{name} 对齐时间不一致；拒绝静默更换训练输入")
+            values = data
+        else:
+            # 原分支使用pose的时间轴插值两列；不同时间轴时拒绝，不能猜测同步关系。
+            if raw_times is not None and not np.array_equal(raw_times, stamps):
+                raise ValueError("原始位姿与夹爪时间轴不同，不能按原OpenPI规则转换")
+            raw_times = stamps
+            stamps, indices = np.unique(stamps, return_index=True)
+            data = data[indices]
             if len(stamps) < 2 or times[0] < stamps[0] or times[-1] > stamps[-1]:
                 raise ValueError(f"{name} 原始反馈不能覆盖相机时间；禁止边界外推")
             nearest = np.searchsorted(stamps, times).clip(1, len(stamps) - 1)
             distance = np.minimum(abs(times - stamps[nearest]), abs(times - stamps[nearest - 1]))
             if np.max(distance) > max_alignment_age_s:
                 raise ValueError(f"{name} 反馈间隙过大")
-            if width == 6:
-                # 跨 ±pi 插值必须先展开，避免中间值跳到零角度。
-                data = data.copy()
-                data[:, 3:6] = np.unwrap(data[:, 3:6], axis=0)
+            # 与原分支一致：逐列线性插值，不unwrap、不将已有RPY折回[-pi,pi]。
             values = np.column_stack([np.interp(times, stamps, data[:, c]) for c in range(width)])
         if values.shape != (len(times), width):
             raise ValueError(f"{name} 维度错误：{values.shape}")
         components.append(values)
     state = np.column_stack(components).astype(np.float32)
-    state[:, 3:6] = (state[:, 3:6] + np.pi) % (2 * np.pi) - np.pi
     if not np.isfinite(state).all() or np.any(state[:, 6] < 0):
         raise ValueError("轨迹状态存在无效值")
     return state
@@ -112,10 +119,11 @@ def convert_episode(source, target, prompt, fps=30):
             for i in range(n):
                 images = {}
                 for name in CAMERAS:
-                    with Image.open(
-                        io.BytesIO(np.asarray(encoded[name][i], dtype=np.uint8).tobytes())
-                    ) as image:
-                        images[name] = np.asarray(image.convert("RGB"))
+                    # JPEG 解码也使用原转换器的 OpenCV 路径，避免解码器差异。
+                    image = cv2.imdecode(np.asarray(encoded[name][i], dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if image is None:
+                        raise ValueError("无法解码相机 JPEG 图像")
+                    images[name] = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 observation = make_observation(state[i], images, prompt)
                 for key in ("exterior_image_1_left", "exterior_image_2_left", "wrist_image_left"):
                     obs[key][i] = observation[key]

@@ -44,7 +44,7 @@ class GUIController:
         while not self.stop_event.wait(0.25):
             if (
                 self.config["backend"] == "piperx"
-                and self.phase == "running"
+                and self.phase in {"running", "homing"}
                 and time.monotonic() - self.last_heartbeat > 5
             ):
                 self.stop("浏览器失联超过5秒，已停止并锁定")
@@ -182,6 +182,8 @@ class GUIController:
             self.ready = False
             self.phase = "awaiting_reset"
         self._wait(lambda: self.ready)
+        if self.config["backend"] == "piperx":
+            self.phase = "homing"
 
     def handle(self, request):
         operation = request["operation"]

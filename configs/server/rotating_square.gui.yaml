@@ -5,6 +5,7 @@ language_instruction: grab the rotating red square
 checkpoint_profile: piper_delta_right_wrist
 action_horizon: 30
 critic_camera_keys: [base_0_rgb, right_wrist_0_rgb]
+edit_action_xyzg: true # 对齐论文Dynamic Picking：edit不修改RPY；基础VLA仍预测完整位姿。
 dataset_path: /data/gcj_data/rl/real_time_expo_ft/data/expo_batch2345_v1
 base_weights: /data/gcj_data/fast/baseline/openpi/trained_model/checkpoints/pi05_piper_10_25_batch2345_h30_lora/pi05_lora_batch2345_h30_10k_20261025/10000/params
 # 由本配置的sft阶段产生；须先完成该阶段并确认末次step，不能用原普通SFT冒充。

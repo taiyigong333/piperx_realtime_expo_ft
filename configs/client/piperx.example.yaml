@@ -20,3 +20,4 @@ gripper_force_n: 1.0
 # module:function(env, observation)->bool，由现场任务实现；null 时禁止真实在线训练。
 success_detector: null
 manual_reset: true
+home_config: configs/client/home.openpi.yaml

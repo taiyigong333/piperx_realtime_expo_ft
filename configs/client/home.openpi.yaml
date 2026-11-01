@@ -1,0 +1,15 @@
+# 2026-11-01只读复制自piperx旧部署 configs/safety.yaml 的home；未做真机路径验收。
+# /home/cv/gcj/project/baseline_fast/openpi；只移动机械臂，不自动张开夹爪。
+joint_positions_rad: [0.0111352006, 0.8443379322, -1.0155198253, 1.1606788592, 0.0746477321, 0.0196698607]
+speed_percent: 10
+joint_tolerance_rad: 0.035
+initial_joint_tolerance_rad: 0.035
+max_joint_delta_rad: 1.7
+joint_limits_rad: [[-2.617994, 2.617994], [0, 3.141593], [-2.96706, 0], [-1.553344, 1.553344], [-1.553344, 1.553344], [-3.141593, 3.141593]]
+timeout_s: 30
+log_interval_s: 1
+max_distance_m: 1
+max_rotation_rad: 2.0
+start_workspace_m: [[-0.02, 1], [-1, 1], [0, 1]]
+control_ready_timeout_s: 2
+poll_s: 0.02

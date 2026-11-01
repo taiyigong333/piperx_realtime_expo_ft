@@ -24,3 +24,4 @@ success_detector_config:
   gripper_width_m: [0.0346, 0.0386] # 成功样本0.0366m，初始宽度容差±2mm。
   consecutive_steps: 6 # 按实际动作步累计，重复RPC不能加速触发。
 manual_reset: true
+home_config: configs/client/home.openpi.yaml

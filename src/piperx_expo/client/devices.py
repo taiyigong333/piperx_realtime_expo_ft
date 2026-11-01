@@ -61,6 +61,7 @@ class PiperXDevices:
         self.frames = {}
         self.failure = None
         self.closed = threading.Event()
+        self.reset_cancel = threading.Event()
         self.pool = ThreadPoolExecutor(max_workers=len(self.cameras))
         self.arm = None
         self.gripper = None
@@ -117,17 +118,13 @@ class PiperXDevices:
         )
 
     def reset(self, confirmed=False):
-        # 每个 episode 由现场人员复位，不复用 DROID 的自动抛放动作。
-        answer = "READY" if confirmed else input("请人工复位方块/机械臂并确认周围安全，输入 READY 继续：")
+        from piperx_expo.client.homing import fixed_joint_home, load_home
+
+        # 方块由现场复位；机械臂每回合都返回同一关节目标，不使用 DROID 抛放动作。
+        answer = "READY" if confirmed else input("请复位方块并确认归位路径安全，输入 READY 执行固定关节归位：")
         if answer != "READY":
             raise RuntimeError("现场复位未确认")
-        deadline = time.monotonic() + 5
-        while not self.arm.enable():
-            if time.monotonic() > deadline:
-                raise RuntimeError("使能超时；请现场检查，不自动调用 reset()")
-            time.sleep(0.05)
-        self.arm.set_speed_percent(self.config["speed_percent"])
-        self.observe()
+        fixed_joint_home(self, load_home(self.config))
 
     def send(self, action):
         self.arm.move_p(action[:6].tolist())

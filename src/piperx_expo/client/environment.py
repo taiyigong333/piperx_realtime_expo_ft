@@ -33,6 +33,9 @@ class PiperXEnv:
         self.device = device or (PiperXDevices(config) if self.real else MockDevices(config))
         self.lock = threading.RLock()
         self.closed = threading.Event()
+        if self.real:
+            # close先置位此事件，使归位等待能退出，避免停止按钮被控制锁阻塞30秒。
+            self.device.reset_cancel = self.closed
         self.armed = False
         self.fault = False
         self.steps = 0
@@ -60,10 +63,15 @@ class PiperXEnv:
             if self.fault:
                 raise RuntimeError("看门狗/控制错误已停止设备，需要现场检查后重启客户端")
             self.armed = False
-            if self.reset_confirm is None:
-                self.device.reset()
-            else:
-                self.device.reset(confirmed=True)
+            try:
+                if self.reset_confirm is None:
+                    self.device.reset()
+                else:
+                    self.device.reset(confirmed=True)
+            except BaseException:
+                self.fault = True
+                self.device.stop_hold()
+                raise
             self.steps = 0
             self.last_action = None
             if hasattr(self.detector, "reset"):

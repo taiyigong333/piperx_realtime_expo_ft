@@ -186,6 +186,7 @@ source = { editable = "../" }
 dependencies = [
     { name = "h5py" },
     { name = "numpy" },
+    { name = "opencv-python" },
     { name = "openpi-client" },
     { name = "pillow" },
     { name = "pyyaml" },
@@ -196,6 +197,7 @@ dependencies = [
 requires-dist = [
     { name = "h5py", specifier = ">=3.10" },
     { name = "numpy", specifier = ">=1.24,<2" },
+    { name = "opencv-python", specifier = "<4.12" },
     { name = "openpi-client", editable = "../third_party/openpi/packages/openpi-client" },
     { name = "pillow", specifier = ">=10" },
     { name = "pyyaml", specifier = ">=6" },

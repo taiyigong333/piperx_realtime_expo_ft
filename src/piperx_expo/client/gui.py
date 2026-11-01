@@ -3,6 +3,7 @@
 import argparse
 import io
 import json
+import logging
 import mimetypes
 import re
 import secrets
@@ -154,6 +155,7 @@ def create_server(controller, host="127.0.0.1", port=8767):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/client/gui.mock.yaml")
     parser.add_argument("--allow-motion", action="store_true")
