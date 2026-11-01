@@ -1079,3 +1079,7 @@ footer > span:first-child {
 .remote-server .action-buttons .text-button { flex: 0 0 100%; text-align: left; white-space: nowrap; }
 .remote-server .action-buttons .button { flex: 1; min-width: 0; padding: 10px; white-space: nowrap; }
 .remote-server > div.mono { white-space: normal; overflow-wrap: anywhere; }
+
+/* 三个独立机械臂操作在窄屏换行，状态提示不挤压按钮。 */
+.session-actions .action-buttons { flex-wrap: wrap; justify-content: flex-end; }
+#hold-status { flex: 0 0 100%; text-align: right; }

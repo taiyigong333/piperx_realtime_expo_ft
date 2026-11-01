@@ -1,4 +1,4 @@
-"""人工恢复使能并保持当前关节；独立于学习器，不恢复旧策略动作。"""
+"""独立的恢复使能、当前位置保持和固定复位；不恢复旧策略动作。"""
 
 import logging
 import threading
@@ -11,8 +11,8 @@ from piperx_expo.client.homing import _home_feedback, load_home
 from piperx_expo.config import resolve_path
 
 
-def enable_current_hold(device, home):
-    """只接受正常/软件急停状态；先覆盖旧目标，再复位和使能。"""
+def enable_current_hold(device, home, *, enable=True):
+    """恢复使能先覆盖旧目标；保持操作要求已使能，禁止隐式恢复。"""
     arm, cancel = device.arm, device.reset_cancel
 
     def status():
@@ -35,6 +35,10 @@ def enable_current_hold(device, home):
     if not np.isfinite(home.get("hold_speed_percent", 1)) or not 0 < home.get("hold_speed_percent", 1) <= 10:
         raise ValueError("hold_speed_percent必须在(0,10]内")
     _, code = status()
+    if not enable:
+        enabled = list(arm.get_joints_enable_status_list())
+        if code != 0 or len(enabled) != 6 or not all(enabled):
+            raise RuntimeError("保持位置需要先恢复使能，不会自动清急停或使能")
     # 先在急停/未使能时覆盖旧目标；SDK仍执行自身目标限位检查，不绕过它。
     status()
     arm.set_speed_percent(home.get("hold_speed_percent", 1))
@@ -42,7 +46,7 @@ def enable_current_hold(device, home):
     arm.set_motion_mode("j")
     status()
     arm.move_j(joints.tolist())
-    if code == 1:
+    if enable and code == 1:
         status()
         arm.reset()
     deadline = time.monotonic() + home["control_ready_timeout_s"]
@@ -54,7 +58,8 @@ def enable_current_hold(device, home):
             raise RuntimeError("恢复期间关节偏离保持起点")
         if code == 0:
             status()
-            arm.enable()
+            if enable:
+                arm.enable()
             enabled = list(arm.get_joints_enable_status_list())
             if (packet.timestamp > sent_at and len(enabled) == 6 and all(enabled)
                     and packet.msg.ctrl_mode == arm.ARM_STATUS.CtrlMode.CAN_CTRL
@@ -72,13 +77,22 @@ def enable_current_hold(device, home):
         cancel.wait(home["poll_s"])
 
 
+def hold_current_position(device, home):
+    """重新锁定实测当前关节，不清急停、不调用使能、不移动到归位目标。"""
+    return enable_current_hold(device, home, enable=False)
+
+
 class ArmHold:
-    def __init__(self, config, heartbeat):
+    def __init__(self, config, heartbeat, action="enable"):
+        if action not in {"enable", "hold", "home"}:
+            raise ValueError("未知机械臂手动操作")
+        self.action = action
         self.config = config
         self.heartbeat = heartbeat
         self.cancel = threading.Event()
         self.release_requested = False
-        self.info = {"phase": "enabling", "running": True, "error": ""}
+        self.info = {"phase": {"enable": "enabling", "hold": "locking", "home": "homing"}[action],
+                     "action": action, "running": True, "error": ""}
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -86,26 +100,42 @@ class ArmHold:
         return dict(self.info)
 
     def _run(self):
-        robot = arm = None
+        robot = arm = full_device = None
         try:
-            from taiyi_piper_x_collect.config import load_config
-            from taiyi_piper_x_collect.devices.piper_x import PiperXRobot
-
-            collection = load_config(resolve_path(self.config["collection_config"]))
-            robot = PiperXRobot(collection.robot, "xyz_rxryrz")
-            robot.start()
-            arm = robot._arm
-            device = SimpleNamespace(arm=arm, config=self.config, reset_cancel=self.cancel)
             home = load_home(self.config)
-            deadline = time.monotonic() + home["control_ready_timeout_s"]
-            while arm.get_joint_angles() is None or arm.get_arm_status() is None:
-                if self.cancel.wait(home["poll_s"]):
-                    raise InterruptedError("恢复使能已取消")
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("等待恢复使能反馈超时")
-            target = enable_current_hold(device, home)
-            self.info = {"phase": "holding", "running": True, "error": "", "joints_rad": target.tolist()}
-            logging.info("机械臂已恢复使能，保持当前关节(rad)=%s", target.tolist())
+            if self.action == "home":
+                from piperx_expo.client.devices import PiperXDevices
+
+                # 固定复位沿用原设备/相机预检和全部归位检查，不单独绕过运动前检查。
+                full_device = PiperXDevices(self.config)
+                full_device.reset_cancel = self.cancel
+                arm = full_device.arm
+                device = full_device
+                full_device.reset(confirmed=True)
+                target = np.asarray(home["joint_positions_rad"], dtype=float)
+                phase, expected_mode = "homed", arm.ARM_STATUS.ModeFeedback.MOVE_P
+            else:
+                from taiyi_piper_x_collect.config import load_config
+                from taiyi_piper_x_collect.devices.piper_x import PiperXRobot
+
+                collection = load_config(resolve_path(self.config["collection_config"]))
+                robot = PiperXRobot(collection.robot, "xyz_rxryrz")
+                robot.start()
+                arm = robot._arm
+                device = SimpleNamespace(arm=arm, config=self.config, reset_cancel=self.cancel)
+                deadline = time.monotonic() + home["control_ready_timeout_s"]
+                while arm.get_joint_angles() is None or arm.get_arm_status() is None:
+                    if self.cancel.wait(home["poll_s"]):
+                        raise InterruptedError("机械臂手动操作已取消")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("等待机械臂反馈超时")
+                target = (enable_current_hold(device, home) if self.action == "enable"
+                          else hold_current_position(device, home))
+                phase = "enabled" if self.action == "enable" else "holding"
+                expected_mode = arm.ARM_STATUS.ModeFeedback.MOVE_J
+            self.info = {"phase": phase, "action": self.action, "running": True,
+                         "error": "", "joints_rad": target.tolist()}
+            logging.info("机械臂手动操作%s完成，当前目标(rad)=%s", self.action, target.tolist())
             while not self.cancel.wait(home["poll_s"]):
                 if time.monotonic() - self.heartbeat() > 5:
                     raise RuntimeError("浏览器失联，保持已停止并锁定")
@@ -116,7 +146,7 @@ class ArmHold:
                         or packet.hz <= 0 or packet.msg.arm_status != 0 or packet.msg.err_code
                         or len(enabled) != 6 or not all(enabled)
                         or packet.msg.ctrl_mode != arm.ARM_STATUS.CtrlMode.CAN_CTRL
-                        or packet.msg.mode_feedback != arm.ARM_STATUS.ModeFeedback.MOVE_J):
+                        or packet.msg.mode_feedback != expected_mode):
                     raise RuntimeError("保持期间控制状态/使能异常")
                 for index in range(1, 7):
                     driver = arm.get_driver_states(joint_index=index)
@@ -133,7 +163,10 @@ class ArmHold:
         finally:
             try:
                 # 仅正常交接给新环境时保留使能；故障、取消、失联仍急停锁定。
-                if arm is not None and not (self.release_requested and self.info["phase"] == "released"):
+                released = self.release_requested and self.info["phase"] == "released"
+                if full_device is not None:
+                    full_device.close(stop_motion=not released)
+                elif arm is not None and not released:
                     arm.electronic_emergency_stop()
             finally:
                 if robot is not None:

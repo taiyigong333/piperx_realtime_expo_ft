@@ -107,7 +107,7 @@ def test_hold_session_keeps_enable_until_handoff_or_stop(monkeypatch, ending):
         deadline = time.monotonic() + 1
         while session.snapshot()["phase"] == "enabling" and time.monotonic() < deadline:
             time.sleep(0.005)
-        assert session.snapshot()["phase"] == "holding", session.snapshot()
+        assert session.snapshot()["phase"] == "enabled", session.snapshot()
         assert not any(cmd == "estop" for cmd, _ in device.arm.commands)
         if ending in {"lost_browser", "lost_enable"}:
             if ending == "lost_browser":
@@ -122,3 +122,74 @@ def test_hold_session_keeps_enable_until_handoff_or_stop(monkeypatch, ending):
         assert any(cmd == "estop" for cmd, _ in device.arm.commands) == (ending != "release")
     finally:
         session.close()
+
+
+def test_hold_only_never_enables_or_resets():
+    from piperx_expo.client.arm_hold import hold_current_position
+
+    device, home = recovery_device(0)
+    actual = device.arm.joints.copy()
+    np.testing.assert_array_equal(hold_current_position(device, home), actual)
+    assert [name for name, _ in device.arm.commands] == ["speed", "mode", "move_j"]
+
+
+@pytest.mark.parametrize("reason", ["disabled", "emergency"])
+def test_hold_requires_enabled_robot_without_implicit_recovery(reason):
+    from piperx_expo.client.arm_hold import hold_current_position
+
+    device, home = recovery_device(1 if reason == "emergency" else 0)
+    if reason == "disabled":
+        device.arm.get_joints_enable_status_list = lambda: [False] * 6
+    with pytest.raises(RuntimeError, match="需要先恢复使能"):
+        hold_current_position(device, home)
+    assert not device.arm.commands
+
+
+def test_separate_home_uses_original_reset_and_preserves_enable_on_handoff(monkeypatch):
+    from piperx_expo.client.arm_hold import ArmHold
+    from piperx_expo.client.homing import fixed_joint_home
+
+    device, home = recovery_device(0)
+    calls = []
+    device.reset = lambda confirmed: (calls.append(("reset", confirmed)), fixed_joint_home(device, home))
+    device.close = lambda stop_motion=True: calls.append(("close", stop_motion))
+    monkeypatch.setattr("piperx_expo.client.devices.PiperXDevices", lambda config: device)
+    session = ArmHold(device.config, time.monotonic, action="home")
+    try:
+        deadline = time.monotonic() + 1
+        while session.snapshot()["phase"] == "homing" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert session.snapshot()["phase"] == "homed", session.snapshot()
+        assert calls == [("reset", True)]
+        targets = [value for name, value in device.arm.commands if name == "move_j"]
+        assert targets == [home["joint_positions_rad"]]
+        assert not any(name == "reset" for name, value in device.arm.commands)
+        session.close(release=True)
+        assert calls[-1] == ("close", False)
+    finally:
+        session.close()
+
+
+def test_three_commands_dispatch_separate_operations(monkeypatch, tmp_path):
+    calls = []
+
+    class Session:
+        def __init__(self, config, heartbeat, action):
+            calls.append(action)
+            self.thread = SimpleNamespace(is_alive=lambda: False)
+
+        def close(self, release=False):
+            pass
+
+        def snapshot(self):
+            return {"phase": "released", "running": False}
+
+    monkeypatch.setattr("piperx_expo.client.gui_control.ArmHold", Session)
+    controller = GUIController(load_config("configs/client/gui.mock.yaml"), tmp_path, allow_motion=True)
+    controller.config["backend"] = "piperx"
+    try:
+        for action in ("recover_enable", "hold_position", "home_arm"):
+            controller.command(action, {"motion_confirmed": True})
+        assert calls == ["enable", "hold", "home"]
+    finally:
+        controller.stop()

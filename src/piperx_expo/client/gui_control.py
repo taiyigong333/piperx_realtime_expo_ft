@@ -236,7 +236,7 @@ class GUIController:
             if self.env is not None:
                 raise RuntimeError("禁止在已建立会话中重建硬件")
             if self.arm_hold:
-                self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] == "holding")
+                self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] in {"enabled", "holding", "homed"})
             self.env = PiperXEnv(
                 copy.deepcopy(self.config), self.allow_motion, reset_confirm=self._reset_confirm
             )
@@ -357,15 +357,18 @@ class GUIController:
                 self.remote_server.request(action.removeprefix("server_"))
         elif action == "start":
             self.start(bool(values.get("demo", False)), values.get("motion_confirmed") is True)
-        elif action == "recover_enable":
+        elif action in {"recover_enable", "hold_position", "home_arm"}:
             with self.condition:
                 if self.config["backend"] != "piperx" or not self.allow_motion or values.get("motion_confirmed") is not True:
-                    raise ValueError("恢复使能需要真机启动许可及现场运动确认")
+                    raise ValueError("机械臂手动操作需要真机启动许可及现场运动确认")
                 if self.worker and self.worker.is_alive():
-                    raise ValueError("请先停止当前学习器连接会话，再恢复使能")
+                    raise ValueError("请先停止当前学习器连接会话，再操作机械臂")
                 if self.arm_hold and self.arm_hold.thread.is_alive():
-                    raise ValueError("恢复使能/保持已在运行")
-                self.arm_hold = ArmHold(copy.deepcopy(self.config), lambda: self.last_heartbeat)
+                    if self.arm_hold.snapshot()["phase"] not in {"enabled", "holding", "homed"}:
+                        raise ValueError("上一机械臂操作尚未完成")
+                    self.arm_hold.close(release=True)
+                operation = {"recover_enable": "enable", "hold_position": "hold", "home_arm": "home"}[action]
+                self.arm_hold = ArmHold(copy.deepcopy(self.config), lambda: self.last_heartbeat, action=operation)
         elif action == "ready":
             with self.condition:
                 if self.phase != "awaiting_reset" or self.ready:

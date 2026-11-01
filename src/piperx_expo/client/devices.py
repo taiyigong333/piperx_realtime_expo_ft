@@ -139,10 +139,12 @@ class PiperXDevices:
         if self.arm is not None:
             self.arm.electronic_emergency_stop()
 
-    def close(self):
+    def close(self, stop_motion=True):
         self.closed.set()
         try:
-            self.stop_hold()
+            # 手动操作正常交接时只释放CAN/相机；默认关闭仍急停。
+            if stop_motion:
+                self.stop_hold()
         finally:
             self.pool.shutdown(wait=True)
             for camera in self.cameras:
