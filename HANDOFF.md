@@ -2,6 +2,8 @@
 
 ## 2026-11-02 恢复使能遗漏控制器恢复的修复
 
+部署验收：功能提交fb68b90已推送main并同步双机；4090正式目录78 passed、1 skipped及模拟RPC通过；piperx Python3.10编译/模拟RPC通过。确认GUI无活动学习器/手动会话后重启，HTTP验证idle、connected=false、arm_hold=idle，新版已读取status_message并显示电机/控制器双重恢复提示。未触发真机reset/enable或发送位置目标；需用户刷新并现场点击恢复使能验收，不能以软件验证宣称支撑能力已恢复。
+
 用户确认按钮无效、机械臂松软。只读现场证据：六驱动driver_enable_status均True，控制器arm_status=1（急停）、ctrl_mode=0（待机）、err_code=0，控制器和驱动时间戳新鲜；驱动首帧hz=0。GUI为idle、手动会话released，无学习器运行。单发enable无法解除急停/恢复CAN控制；驱动使能标志不能证明控制器已恢复，也不能证明真实支撑能力。
 
 修复恢复使能：不读取关节/法兰、不做归位范围判定；对新鲜反馈中的急停状态且err_code=0发送一次SDK reset（控制器状态复位，不是机械臂回归位），恢复配置速度和MOVE_P/CAN控制，再调用enable。连接初期尚无控制器反馈也先发送使能；点击后enable_recovery_timeout_s=3秒内允许每0.1秒重试模式/使能，急停reset最多一次，不永久自动恢复。不用reset清除碰撞或其他故障，物理急停仍受硬件联锁约束。不发送move_p/move_j目标。
