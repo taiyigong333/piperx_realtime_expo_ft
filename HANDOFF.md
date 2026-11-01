@@ -12,6 +12,8 @@
 
 ## 本轮最新修改（2026-11-01）
 
+部署验收：功能提交`2bd1014`已推送main并同步4090/piperx。4090正式目录55 passed、1 skipped，模拟RPC与CPU checkpoint表示检查通过，`edit_action_xyzg=true`；piperx Python3.10编译/模拟RPC通过，正式有线SSH管理状态为idle（未启动RL）。双机工作区干净，保留现场配置、数据与权重。
+
 当前覆盖（用户最新要求）：CLI/GUI两份服务器配置均恢复`edit_action_xyzg: true`，屏蔽edit的旋转编辑。机器人GUI新增服务器RL启动/停止/状态/日志，使用既有有线SSH别名`gh4090piper-wired`；每次启动自动生成独立run与配置快照，无需手工SSH/tmux。停止先锁定本机设备再停止专属服务器任务；停止后可在同一页面重新确认现场、建立全新会话。本轮验证只用模拟服务，正式“启动服务器 RL”会加载配置指定的真实模型；当前OpenPI/RL state仍为末端XYZ/RPY+夹爪。详见[GUI远程训练管理](docs/GUI远程训练管理.md)。验证结果：本地52 passed、4 skipped（JAX及Linux /proc项）；4090隔离副本55 passed、1 skipped。模拟RPC、Ruff、JS语法通过。机器人Python3.10 GUI经既有有线SSH实际启动/停止4090的独立18107端口mock服务，页面显示就绪与日志，停止后独立确认running=false、phase=stopped、exit_code=-2；临时GUI和转发均已关闭。未加载完整模型、未启动真实RL或真机运动。
 
 功能提交`739d1b4`已推送main并同步4090和piperx，双机工作区干净；piperx客户端Python3.10 locked同步、编译及模拟RPC通过，4090部署后根测试46 passed、1 skipped、模拟RPC和server GPU小算子验证通过。现场忽略配置和数据/权重保持原状；未启动控制进程、真实运动或在线RL。
