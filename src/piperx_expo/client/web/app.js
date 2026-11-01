@@ -100,7 +100,7 @@ $("ready").onclick = () => {
 $("stop").onclick = () => command("stop");
 $("server-start").onclick = () => command("server_start");
 $("server-stop").onclick = () => command("server_stop");
-for (const [id, action] of [["recover-enable", "recover_enable"], ["hold-position", "hold_position"], ["home-arm", "home_arm"]]) {
+for (const [id, action] of [["recover-enable", "recover_enable"], ["hold-position", "hold_position"], ["home-arm", "home_arm"], ["cancel-hold", "cancel_hold"]]) {
   $(id).onclick = () => command(action, {motion_confirmed: $("motion-confirm").checked});
 }
 $("server-refresh").onclick = () => command("server_status");
@@ -241,14 +241,16 @@ function render(s) {
     phase = s.phase;
   const remote = s.remote_server || { enabled: false };
   const hold = s.arm_hold || {};
-  const armBusy = hold.running && !["enabled", "holding", "homed"].includes(hold.phase);
+  const armBusy = hold.running && !["enable_sent", "enabled", "holding", "homed"].includes(hold.phase);
   for (const id of ["recover-enable", "hold-position", "home-arm"]) {
     $(id).hidden = s.backend !== "piperx";
     $(id).disabled = !s.can_start || armBusy;
   }
-  $("hold-status").textContent = hold.error || ({enabling: "正在恢复使能", enabled: "使能已恢复", locking: "正在锁定当前位置",
+  $("cancel-hold").hidden = s.backend !== "piperx";
+  $("cancel-hold").disabled = !hold.running || hold.action !== "hold";
+  $("hold-status").textContent = hold.error || ({enabling: "正在恢复使能", enable_sent: "使能指令已发送，反馈尚未确认", enabled: "六关节使能已确认", locking: "正在锁定当前位置",
     holding: "正在保持位置", homing: "正在固定复位", homed: "机械臂复位完成，维持使能",
-    released: "已交接学习器", stopped: "保持已停止"}[hold.phase] || "");
+    released: "手动锁定已释放，未自动运动", stopped: "保持已停止"}[hold.phase] || "");
   $("remote-server").hidden = !remote.enabled;
   if (remote.enabled) {
     const names = {idle: "尚未启动", unknown: "状态未确认", loading: "模型初始化中",

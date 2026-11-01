@@ -191,7 +191,7 @@ def test_http_auth_and_parameter_validation(tmp_path):
     try:
         page = urllib.request.urlopen(base).read().decode()
         assert "回合复核" in page and "__EXPO_TOKEN__" not in page
-        for button_id in ("recover-enable", "hold-position", "home-arm"):
+        for button_id in ("recover-enable", "hold-position", "cancel-hold", "home-arm"):
             assert f'id="{button_id}"' in page
         request = urllib.request.Request(base + "/api/command/start", data=b"{}", method="POST")
         with pytest.raises(urllib.error.HTTPError) as denied:

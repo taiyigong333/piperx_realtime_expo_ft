@@ -236,7 +236,7 @@ class GUIController:
             if self.env is not None:
                 raise RuntimeError("禁止在已建立会话中重建硬件")
             if self.arm_hold:
-                self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] in {"enabled", "holding", "homed"})
+                self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] in {"enable_sent", "enabled", "holding", "homed"})
             self.env = PiperXEnv(
                 copy.deepcopy(self.config), self.allow_motion, reset_confirm=self._reset_confirm
             )
@@ -364,11 +364,16 @@ class GUIController:
                 if self.worker and self.worker.is_alive():
                     raise ValueError("请先停止当前学习器连接会话，再操作机械臂")
                 if self.arm_hold and self.arm_hold.thread.is_alive():
-                    if self.arm_hold.snapshot()["phase"] not in {"enabled", "holding", "homed"}:
+                    if self.arm_hold.snapshot()["phase"] not in {"enable_sent", "enabled", "holding", "homed"}:
                         raise ValueError("上一机械臂操作尚未完成")
                     self.arm_hold.close(release=True)
                 operation = {"recover_enable": "enable", "hold_position": "hold", "home_arm": "home"}[action]
                 self.arm_hold = ArmHold(copy.deepcopy(self.config), lambda: self.last_heartbeat, action=operation)
+        elif action == "cancel_hold":
+            with self.condition:
+                if self.arm_hold and self.arm_hold.action == "hold":
+                    # 只结束本程序保持连接；不发送急停/失能，也不恢复旧目标。
+                    self.arm_hold.close(release=True)
         elif action == "ready":
             with self.condition:
                 if self.phase != "awaiting_reset" or self.ready:

@@ -11,75 +11,45 @@ from piperx_expo.client.homing import _home_feedback, load_home
 from piperx_expo.config import resolve_path
 
 
-def enable_current_hold(device, home, *, enable=True):
-    """恢复使能先覆盖旧目标；保持操作要求已使能，禁止隐式恢复。"""
-    arm, cancel = device.arm, device.reset_cancel
+def restore_enable(device):
+    """仅发送SDK使能指令，不关联归位、保持、模式切换或控制器复位。"""
+    if device.reset_cancel.is_set():
+        raise InterruptedError("恢复使能已取消")
+    device.arm.enable()
 
-    def status():
-        if cancel.is_set():
-            raise InterruptedError("恢复使能已取消")
-        packet = arm.get_arm_status()
-        if (packet is None or packet.hz <= 0
-                or not 0 <= time.time() - packet.timestamp < device.config["feedback_timeout_s"]):
-            raise RuntimeError("恢复使能控制器反馈缺失或过期")
-        code = getattr(packet.msg.arm_status, "value", packet.msg.arm_status)
-        if code not in (0, 1) or packet.msg.err_code:
-            raise RuntimeError("存在硬件故障，禁止自动清错/使能")
-        return packet, code
 
-    joints, _ = _home_feedback(device, arm.get_joint_angles, (6,))
-    limits = np.asarray(home["joint_limits_rad"])
-    # 保持不能沿用归位的起点测量容差：SDK会把越限目标裁剪，导致使能时移动。
-    if np.any(joints < limits[:, 0]) or np.any(joints > limits[:, 1]):
-        raise ValueError("当前关节超出SDK目标限位，保持目标会被裁剪；请先现场调整合法姿态")
-    if not np.isfinite(home.get("hold_speed_percent", 1)) or not 0 < home.get("hold_speed_percent", 1) <= 10:
-        raise ValueError("hold_speed_percent必须在(0,10]内")
-    _, code = status()
-    if not enable:
-        enabled = list(arm.get_joints_enable_status_list())
-        if code != 0 or len(enabled) != 6 or not all(enabled):
-            raise RuntimeError("保持位置需要先恢复使能，不会自动清急停或使能")
-    # 先在急停/未使能时覆盖旧目标；SDK仍执行自身目标限位检查，不绕过它。
-    status()
-    arm.set_speed_percent(home.get("hold_speed_percent", 1))
-    status()
-    arm.set_motion_mode("j")
-    status()
-    arm.move_j(joints.tolist())
-    if enable and code == 1:
-        status()
-        arm.reset()
-    deadline = time.monotonic() + home["control_ready_timeout_s"]
-    sent_at = time.time()
-    while True:
-        packet, code = status()
-        actual, _ = _home_feedback(device, arm.get_joint_angles, (6,))
-        if np.max(np.abs(actual - joints)) > home["joint_tolerance_rad"]:
-            raise RuntimeError("恢复期间关节偏离保持起点")
-        if code == 0:
-            status()
-            if enable:
-                arm.enable()
-            enabled = list(arm.get_joints_enable_status_list())
-            if (packet.timestamp > sent_at and len(enabled) == 6 and all(enabled)
-                    and packet.msg.ctrl_mode == arm.ARM_STATUS.CtrlMode.CAN_CTRL
-                    and packet.msg.mode_feedback == arm.ARM_STATUS.ModeFeedback.MOVE_J):
-                # 六个驱动使能标志也必须来自新鲜反馈，不能相信缓存的True。
-                for index in range(1, 7):
-                    driver = arm.get_driver_states(joint_index=index)
-                    if (driver is None or driver.hz <= 0 or driver.timestamp <= sent_at
-                            or not 0 <= time.time() - driver.timestamp < device.config["feedback_timeout_s"]):
-                        break
-                else:
-                    return joints
+def hold_current_position(device, home=None):
+    """读取一次法兰位置并锁定；不把归位检查作为手动保持的前提。"""
+    if device.reset_cancel.is_set():
+        raise InterruptedError("保持位置已取消")
+    # CAN刚连接时等待首帧；这只取得保持目标，不检查其时效/状态/工作空间。
+    deadline = time.monotonic() + device.config.get("manual_feedback_wait_s", 2)
+    packet = device.arm.get_flange_pose()
+    while packet is None:
+        if device.reset_cancel.wait(0.02):
+            raise InterruptedError("保持位置已取消")
         if time.monotonic() >= deadline:
-            raise TimeoutError("恢复使能/保持模式确认超时")
-        cancel.wait(home["poll_s"])
+            raise RuntimeError("无法读取当前位置（CAN尚无位姿反馈），未发送保持目标")
+        packet = device.arm.get_flange_pose()
+    pose = np.asarray(packet.msg, dtype=float)
+    if device.reset_cancel.is_set():
+        raise InterruptedError("保持位置已取消")
+    # 原样使用米/rad法兰位姿，避免SDK将负关节角裁剪成零而产生移动。
+    # 不额外判断反馈年龄、关节限位、工作区、使能或控制器模式；SDK自身格式校验保留。
+    device.arm.move_p(pose.tolist())
+    return pose
 
 
-def hold_current_position(device, home):
-    """重新锁定实测当前关节，不清急停、不调用使能、不移动到归位目标。"""
-    return enable_current_hold(device, home, enable=False)
+def _enable_confirmation(arm, timeout):
+    """使能后的只读显示，不拦截发送，也不因反馈未到触发急停。"""
+    try:
+        packets = [arm.get_driver_states(joint_index=i) for i in range(1, 7)]
+        if any(p is None or not 0 <= time.time() - p.timestamp < timeout or p.hz <= 0 for p in packets):
+            return False
+        flags = list(arm.get_joints_enable_status_list())
+        return len(flags) == 6 and all(flags)
+    except Exception:
+        return False
 
 
 class ArmHold:
@@ -102,8 +72,11 @@ class ArmHold:
     def _run(self):
         robot = arm = full_device = None
         try:
-            home = load_home(self.config)
+            home = None
+            poll_s = 0.05
             if self.action == "home":
+                home = load_home(self.config)
+                poll_s = home["poll_s"]
                 from piperx_expo.client.devices import PiperXDevices
 
                 # 固定复位沿用原设备/相机预检和全部归位检查，不单独绕过运动前检查。
@@ -123,22 +96,27 @@ class ArmHold:
                 robot.start()
                 arm = robot._arm
                 device = SimpleNamespace(arm=arm, config=self.config, reset_cancel=self.cancel)
-                deadline = time.monotonic() + home["control_ready_timeout_s"]
-                while arm.get_joint_angles() is None or arm.get_arm_status() is None:
-                    if self.cancel.wait(home["poll_s"]):
-                        raise InterruptedError("机械臂手动操作已取消")
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("等待机械臂反馈超时")
-                target = (enable_current_hold(device, home) if self.action == "enable"
-                          else hold_current_position(device, home))
-                phase = "enabled" if self.action == "enable" else "holding"
-                expected_mode = arm.ARM_STATUS.ModeFeedback.MOVE_J
-            self.info = {"phase": phase, "action": self.action, "running": True,
-                         "error": "", "joints_rad": target.tolist()}
-            logging.info("机械臂手动操作%s完成，当前目标(rad)=%s", self.action, target.tolist())
-            while not self.cancel.wait(home["poll_s"]):
+                if self.action == "enable":
+                    restore_enable(device)
+                    phase, target = "enable_sent", None
+                else:
+                    target = hold_current_position(device)
+                    phase = "holding"
+            self.info = {"phase": phase, "action": self.action, "running": True, "error": ""}
+            if target is not None:
+                self.info["joints_rad" if self.action == "home" else "pose_m_rad"] = target.tolist()
+            logging.info("机械臂手动操作%s指令已发送", self.action)
+            while not self.cancel.wait(poll_s):
                 if time.monotonic() - self.heartbeat() > 5:
-                    raise RuntimeError("浏览器失联，保持已停止并锁定")
+                    raise RuntimeError("浏览器失联，手动操作已停止并锁定")
+                if self.action == "enable":
+                    confirmed = _enable_confirmation(arm, self.config["feedback_timeout_s"])
+                    self.info = {"phase": "enabled" if confirmed else "enable_sent", "action": "enable",
+                                 "running": True, "error": "", "enable_confirmed": confirmed}
+                    continue
+                if self.action == "hold":
+                    # 目标只读取/发送一次；不再用归位反馈判定撤销用户的保持操作。
+                    continue
                 actual, _ = _home_feedback(device, arm.get_joint_angles, (6,))
                 packet = arm.get_arm_status()
                 enabled = list(arm.get_joints_enable_status_list())
@@ -158,8 +136,11 @@ class ArmHold:
             self.info = {"phase": "released" if self.release_requested else "stopped",
                          "running": False, "error": ""}
         except BaseException as error:
-            logging.exception("恢复使能/保持失败，执行停止锁定")
-            self.info = {"phase": "fault", "running": False, "error": str(error)}
+            if self.release_requested and self.cancel.is_set() and isinstance(error, InterruptedError):
+                self.info = {"phase": "released", "running": False, "error": ""}
+            else:
+                logging.exception("机械臂手动操作失败，执行停止锁定")
+                self.info = {"phase": "fault", "running": False, "error": str(error)}
         finally:
             try:
                 # 仅正常交接给新环境时保留使能；故障、取消、失联仍急停锁定。
