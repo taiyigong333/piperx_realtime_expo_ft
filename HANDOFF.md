@@ -12,6 +12,8 @@
 
 ## 本轮最新修改（2026-11-01）
 
+功能提交`739d1b4`已推送main并同步4090和piperx，双机工作区干净；piperx客户端Python3.10 locked同步、编译及模拟RPC通过，4090部署后根测试46 passed、1 skipped、模拟RPC和server GPU小算子验证通过。现场忽略配置和数据/权重保持原状；未启动控制进程、真实运动或在线RL。
+
 - 数据基准是data-transfer的`piperx_to_openpi_vla@3a26229`；旧OpenPI部署只参考归位。统一OpenCV INTER_AREA/JPEG解码，去除额外RPY折回/unwrap；原394条44721帧导入集全量数值与源哈希一致，视频抽18帧、原归一化通过。
 - 已核论文和固定上游：论文执行末端速度，本工程为兼容既有Piper-X checkpoint保留绝对法兰控制、VLA内部delta；这是方法迁移，不能称控制空间/所有超参数严格复现。详见[表示合同](docs/数据表示与固定归位核对_20261101.md)。
 - `edit_action_xyzg`默认true，按论文只编辑XYZ和夹爪；false可选全7维编辑。基础VLA始终输出完整7维动作，开关不要求重训RTC-SFT，不同RL模式分run保存。
