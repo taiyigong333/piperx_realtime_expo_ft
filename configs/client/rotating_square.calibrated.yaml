@@ -23,6 +23,8 @@ success_detector_config:
   height_m: 0.281807 # 成功样本z=0.286807m，下移5mm作为初始容差。
   gripper_width_m: [0.0346, 0.0386] # 成功样本0.0366m，初始宽度容差±2mm。
   consecutive_steps: 6 # 按实际动作步累计，重复RPC不能加速触发。
+# 恢复使能允许CAN状态稍后到达；只在本次点击后的有界窗口重试，不后台永久使能。
+enable_recovery_timeout_s: 3
 manual_reset: true
 home_config: configs/client/home.openpi.yaml
 # 仅由本机GUI管理；复用机器人电脑已有的有线SSH连接，不保存密码/私钥。

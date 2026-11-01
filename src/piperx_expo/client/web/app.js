@@ -248,7 +248,7 @@ function render(s) {
   }
   $("cancel-hold").hidden = s.backend !== "piperx";
   $("cancel-hold").disabled = !hold.running || hold.action !== "hold";
-  $("hold-status").textContent = hold.error || ({enabling: "正在恢复使能", enable_sent: "使能指令已发送，反馈尚未确认", enabled: "六关节使能已确认", locking: "正在锁定当前位置",
+  $("hold-status").textContent = hold.error || hold.status_message || ({enabling: "正在恢复使能", enable_sent: "使能指令已发送，反馈尚未确认", enabled: "电机与控制器已恢复", locking: "正在锁定当前位置",
     holding: "正在保持位置", homing: "正在固定复位", homed: "机械臂复位完成，维持使能",
     released: "手动锁定已释放，未自动运动", stopped: "保持已停止"}[hold.phase] || "");
   $("remote-server").hidden = !remote.enabled;

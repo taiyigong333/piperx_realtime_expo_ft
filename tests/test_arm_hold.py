@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from piperx_expo.client.arm_hold import restore_enable, hold_current_position
+from piperx_expo.client.arm_hold import restore_enable, hold_current_position, _enable_confirmation
 from piperx_expo.client.gui_control import GUIController
 from piperx_expo.config import load_config
 from test_homing import device_and_home
@@ -16,7 +16,8 @@ def recovery_device(code=1):
     arm = device.arm
     arm.joints = np.asarray(home["joint_positions_rad"]).copy()
     arm.status_code = code
-    arm.get_driver_states = lambda joint_index: arm.packet(True)
+    arm.get_driver_states = lambda joint_index: arm.packet(
+        SimpleNamespace(foc_status=SimpleNamespace(driver_enable_status=True)))
     arm.get_arm_status = lambda: arm.packet(SimpleNamespace(
         arm_status=arm.status_code, err_code=0, ctrl_mode=1, mode_feedback=1 if arm.mode == "j" else 2))
 
@@ -36,9 +37,9 @@ def test_enable_only_ignores_all_home_feedback():
     device, home = recovery_device()
     device.arm.get_joint_angles = lambda: pytest.fail("恢复使能不能读关节")
     device.arm.get_flange_pose = lambda: pytest.fail("恢复使能不能读位姿")
-    device.arm.get_arm_status = lambda: pytest.fail("恢复使能不能检查控制器模式")
     restore_enable(device)
-    assert device.arm.commands == [("enable", None)]
+    assert device.arm.commands == [("reset", None), ("speed", device.config["speed_percent"]),
+                                   ("mode", "p"), ("enable", None)]
 
 
 def test_cancelled_enable_does_not_send_command():
@@ -200,6 +201,7 @@ def test_simple_actions_do_not_load_home_or_keep_checking_positions(monkeypatch,
     monkeypatch.setitem(sys.modules, "taiyi_piper_x_collect.config", config_module)
     monkeypatch.setitem(sys.modules, "taiyi_piper_x_collect.devices.piper_x", devices_module)
     monkeypatch.setattr("piperx_expo.client.arm_hold.load_home", lambda config: pytest.fail("不能加载归位配置"))
+    device.config["enable_recovery_timeout_s"] = 0.15
     session = ArmHold(device.config, time.monotonic, action=action)
     try:
         deadline = time.monotonic()+1
@@ -209,11 +211,18 @@ def test_simple_actions_do_not_load_home_or_keep_checking_positions(monkeypatch,
         assert session.snapshot()["phase"] == ("enable_sent" if action == "enable" else "holding")
         assert not session.snapshot()["error"]
         assert calls.count("read") == (1 if action == "hold" else 0)
+        if action == "enable":
+            time.sleep(0.15)
+            count = sum(name == "enable" for name, _ in device.arm.commands)
+            time.sleep(0.15)
+            assert sum(name == "enable" for name, _ in device.arm.commands) == count
+            assert "恢复未完成" in session.snapshot()["status_message"]
         session.close(release=True)
         assert "estop" not in calls
-        assert not any(name == "reset" for name, _ in device.arm.commands)
         if action == "enable":
-            assert device.arm.commands == [("enable", None)]
+            names = [name for name, _ in device.arm.commands]
+            assert names.count("reset") == 1 and names.count("enable") >= 1
+            assert not any(name in {"move_j", "move_p"} for name in names)
         else:
             assert device.arm.commands == []
     finally:
@@ -241,3 +250,51 @@ def test_cancel_hold_waiting_for_first_pose_never_sends_stop_or_target(monkeypat
     session.close(release=True)
     assert session.snapshot()["phase"] == "released"
     assert calls == ["disconnect"]
+
+
+@pytest.mark.parametrize("controller_code,ctrl_mode", [(1, 1), (0, 0)])
+def test_driver_flags_alone_cannot_report_recovery_success(controller_code, ctrl_mode):
+    device, home = recovery_device(controller_code)
+    device.arm.get_arm_status = lambda: device.arm.packet(SimpleNamespace(
+        arm_status=controller_code, err_code=0, ctrl_mode=ctrl_mode))
+    status = _enable_confirmation(device.arm, device.config["feedback_timeout_s"])
+    assert status["motors_enabled"]
+    assert not status["controller_ready"] and not status["enable_confirmed"]
+
+
+def test_fresh_first_driver_packets_with_zero_hz_can_confirm_recovery():
+    device, home = recovery_device(0)
+    original = device.arm.get_driver_states
+
+    def first_packet(joint_index):
+        packet = original(joint_index)
+        packet.hz = 0
+        return packet
+
+    device.arm.get_driver_states = first_packet
+    status = _enable_confirmation(device.arm, device.config["feedback_timeout_s"])
+    assert status["motors_enabled"] and status["controller_ready"] and status["enable_confirmed"]
+
+
+def test_enable_recovers_late_software_estop_once_without_position_commands():
+    device, home = recovery_device(1)
+    getter = device.arm.get_arm_status
+    device.arm.get_arm_status = lambda: None
+    reset_sent = restore_enable(device)
+    assert not reset_sent
+    device.arm.get_arm_status = getter
+    reset_sent = restore_enable(device, reset_sent=reset_sent)
+    assert reset_sent
+    restore_enable(device, reset_sent=reset_sent)
+    names = [name for name, _ in device.arm.commands]
+    assert names.count("reset") == 1
+    assert names.count("enable") == 3
+    assert "move_j" not in names and "move_p" not in names
+
+
+def test_enable_does_not_reset_hardware_fault():
+    device, home = recovery_device(7)
+    restore_enable(device)
+    assert not any(name == "reset" for name, _ in device.arm.commands)
+    status = _enable_confirmation(device.arm, device.config["feedback_timeout_s"])
+    assert not status["controller_ready"] and "未自动清错" in status["status_message"]

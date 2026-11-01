@@ -11,11 +11,30 @@ from piperx_expo.client.homing import _home_feedback, load_home
 from piperx_expo.config import resolve_path
 
 
-def restore_enable(device):
-    """仅发送SDK使能指令，不关联归位、保持、模式切换或控制器复位。"""
-    if device.reset_cancel.is_set():
-        raise InterruptedError("恢复使能已取消")
-    device.arm.enable()
+def restore_enable(device, *, reset_sent=False):
+    """恢复软件急停、CAN控制及电机使能；不读取位置、不归位或保持。"""
+    arm = device.arm
+
+    def check_cancel():
+        if device.reset_cancel.is_set():
+            raise InterruptedError("恢复使能已取消")
+
+    check_cancel()
+    packet = arm.get_arm_status()
+    # 仅对急停状态且无其他错误发送SDK reset；不清除碰撞/驱动故障，物理急停仍受硬件联锁约束。
+    # 刚连CAN尚无状态时仍发送使能；后台后续重试会处理到达的状态。
+    if (not reset_sent and packet is not None
+            and 0 <= time.time() - packet.timestamp < device.config["feedback_timeout_s"]
+            and packet.msg.arm_status == 1 and packet.msg.err_code == 0):
+        arm.reset()
+        reset_sent = True
+    check_cancel()
+    arm.set_speed_percent(device.config.get("speed_percent", 10))
+    check_cancel()
+    arm.set_motion_mode("p")  # SDK模式帧同时选择CAN控制，解除待机；不下发位置目标。
+    check_cancel()
+    arm.enable()
+    return reset_sent
 
 
 def hold_current_position(device, home=None):
@@ -40,16 +59,41 @@ def hold_current_position(device, home=None):
     return pose
 
 
-def _enable_confirmation(arm, timeout):
-    """使能后的只读显示，不拦截发送，也不因反馈未到触发急停。"""
+def _enable_confirmation(arm, timeout, sent_at=0):
+    """分别确认驱动与控制器；第一帧hz=0也可用，但时间戳必须新鲜。"""
+    def fresh(packet):
+        return (packet is not None and packet.timestamp > sent_at
+                and 0 <= time.time() - packet.timestamp < timeout)
+
+    flags, controller = [], None
     try:
         packets = [arm.get_driver_states(joint_index=i) for i in range(1, 7)]
-        if any(p is None or not 0 <= time.time() - p.timestamp < timeout or p.hz <= 0 for p in packets):
-            return False
-        flags = list(arm.get_joints_enable_status_list())
-        return len(flags) == 6 and all(flags)
+        flags = [bool(p.msg.foc_status.driver_enable_status) if fresh(p) else None for p in packets]
+        packet = arm.get_arm_status()
+        if fresh(packet):
+            controller = {key: int(getattr(packet.msg, key))
+                          for key in ("arm_status", "ctrl_mode", "err_code")}
     except Exception:
-        return False
+        pass
+    motors = len(flags) == 6 and all(flag is True for flag in flags)
+    ready = (controller is not None and controller["arm_status"] == 0
+             and controller["ctrl_mode"] == int(arm.ARM_STATUS.CtrlMode.CAN_CTRL)
+             and controller["err_code"] == 0)
+    if motors and ready:
+        message = "电机已使能，控制器已恢复CAN控制"
+    elif controller and controller["arm_status"] == 1:
+        message = "电机已使能，但控制器仍在急停" if motors else "控制器仍在急停，电机使能尚未全部确认"
+    elif controller and controller["err_code"]:
+        message = f"控制器故障码={controller['err_code']}，未自动清错"
+    elif controller and controller["arm_status"] not in (0, 1):
+        message = f"控制器状态={controller['arm_status']}，未自动清错"
+    elif motors:
+        message = "电机已使能，控制器仍待机或反馈未确认"
+    else:
+        message = "恢复指令已发送，电机/控制器反馈尚未全部确认"
+    return {"enable_confirmed": motors and ready, "motors_enabled": motors,
+            "drivers_enabled": flags, "controller_ready": ready,
+            "controller": controller, "status_message": message}
 
 
 class ArmHold:
@@ -97,7 +141,10 @@ class ArmHold:
                 arm = robot._arm
                 device = SimpleNamespace(arm=arm, config=self.config, reset_cancel=self.cancel)
                 if self.action == "enable":
-                    restore_enable(device)
+                    enable_started = time.time()
+                    reset_sent = restore_enable(device)
+                    retry_until = time.monotonic() + self.config.get("enable_recovery_timeout_s", 3)
+                    next_retry = time.monotonic() + 0.1
                     phase, target = "enable_sent", None
                 else:
                     target = hold_current_position(device)
@@ -110,9 +157,15 @@ class ArmHold:
                 if time.monotonic() - self.heartbeat() > 5:
                     raise RuntimeError("浏览器失联，手动操作已停止并锁定")
                 if self.action == "enable":
-                    confirmed = _enable_confirmation(arm, self.config["feedback_timeout_s"])
-                    self.info = {"phase": "enabled" if confirmed else "enable_sent", "action": "enable",
-                                 "running": True, "error": "", "enable_confirmed": confirmed}
+                    status = _enable_confirmation(arm, self.config["feedback_timeout_s"], enable_started)
+                    now = time.monotonic()
+                    if not status["enable_confirmed"] and next_retry <= now < retry_until:
+                        reset_sent = restore_enable(device, reset_sent=reset_sent)
+                        next_retry = now + 0.1
+                    if not status["enable_confirmed"] and now >= retry_until:
+                        status["status_message"] = "恢复未完成：" + status["status_message"]
+                    self.info = {"phase": "enabled" if status["enable_confirmed"] else "enable_sent",
+                                 "action": "enable", "running": True, "error": "", **status}
                     continue
                 if self.action == "hold":
                     # 目标只读取/发送一次；不再用归位反馈判定撤销用户的保持操作。
