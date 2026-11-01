@@ -111,9 +111,10 @@ class ArmHold:
                     raise RuntimeError("浏览器失联，保持已停止并锁定")
                 actual, _ = _home_feedback(device, arm.get_joint_angles, (6,))
                 packet = arm.get_arm_status()
+                enabled = list(arm.get_joints_enable_status_list())
                 if (packet is None or not 0 <= time.time() - packet.timestamp < self.config["feedback_timeout_s"]
                         or packet.hz <= 0 or packet.msg.arm_status != 0 or packet.msg.err_code
-                        or not all(arm.get_joints_enable_status_list())
+                        or len(enabled) != 6 or not all(enabled)
                         or packet.msg.ctrl_mode != arm.ARM_STATUS.CtrlMode.CAN_CTRL
                         or packet.msg.mode_feedback != arm.ARM_STATUS.ModeFeedback.MOVE_J):
                     raise RuntimeError("保持期间控制状态/使能异常")

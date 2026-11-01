@@ -84,7 +84,7 @@ def test_recovery_requires_motion_authorization_and_no_active_session(tmp_path, 
         controller.stop()
 
 
-@pytest.mark.parametrize("ending", ["release", "stop", "lost_browser"])
+@pytest.mark.parametrize("ending", ["release", "stop", "lost_browser", "lost_enable"])
 def test_hold_session_keeps_enable_until_handoff_or_stop(monkeypatch, ending):
     import sys
     import types
@@ -109,8 +109,11 @@ def test_hold_session_keeps_enable_until_handoff_or_stop(monkeypatch, ending):
             time.sleep(0.005)
         assert session.snapshot()["phase"] == "holding", session.snapshot()
         assert not any(cmd == "estop" for cmd, _ in device.arm.commands)
-        if ending == "lost_browser":
-            heartbeat[0] -= 10
+        if ending in {"lost_browser", "lost_enable"}:
+            if ending == "lost_browser":
+                heartbeat[0] -= 10
+            else:
+                device.arm.get_joints_enable_status_list = lambda: []
             session.thread.join(1)
             assert session.snapshot()["phase"] == "fault"
         else:

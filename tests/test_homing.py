@@ -155,9 +155,31 @@ def test_workspace_rejection_reports_measurement_and_never_enables():
     from piperx_expo.client.homing import check_home_start
 
     device, home = device_and_home()
-    device.arm.get_flange_pose = lambda: device.arm.packet([-0.08, 0, -0.01, 0, 0, 0])
-    with pytest.raises(ValueError, match=r"X=-0.080000m.*Z=-0.010000m.*未使能"):
+    device.arm.get_flange_pose = lambda: device.arm.packet([-0.11, 0, -0.11, 0, 0, 0])
+    with pytest.raises(ValueError, match=r"X=-0.110000m.*Z=-0.110000m.*未使能"):
         check_home_start(device, home)
     with pytest.raises(ValueError, match="起点超出"):
+        fixed_joint_home(device, home)
+    assert not device.arm.commands
+
+
+def test_relaxed_home_start_keeps_policy_workspace_and_target_unchanged():
+    device, home = device_and_home()
+    assert device.config["workspace_m"][0][0] == -0.02
+    assert device.config["workspace_m"][2][0] == 0
+    device.arm.get_flange_pose = lambda: device.arm.packet([-0.08, 0, -0.01, 0, 0, 0])
+    fixed_joint_home(device, home)
+    moves = [target for cmd, target in device.arm.commands if cmd == "move_j"]
+    assert moves == [home["joint_positions_rad"]]
+
+
+def test_measured_joint_start_within_relaxed_tolerance_but_excess_still_rejected():
+    device, home = device_and_home()
+    device.arm.joints = np.asarray(home["joint_positions_rad"]).copy()
+    device.arm.joints[1] = -0.04441863
+    fixed_joint_home(device, home)
+    device.arm.commands.clear()
+    device.arm.joints[1] = -0.061
+    with pytest.raises(ValueError, match="起点关节超限"):
         fixed_joint_home(device, home)
     assert not device.arm.commands

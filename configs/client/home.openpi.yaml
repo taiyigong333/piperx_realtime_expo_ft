@@ -3,13 +3,16 @@
 joint_positions_rad: [0.0111352006, 0.8443379322, -1.0155198253, 1.1606788592, 0.0746477321, 0.0196698607]
 speed_percent: 10
 joint_tolerance_rad: 0.035
-initial_joint_tolerance_rad: 0.035
+# 现场只读反馈J2=-0.04442rad；仅放宽起点测量容差，目标仍严格受关节限位约束。
+initial_joint_tolerance_rad: 0.06
 max_joint_delta_rad: 1.7
 joint_limits_rad: [[-2.617994, 2.617994], [0, 3.141593], [-2.96706, 0], [-1.553344, 1.553344], [-1.553344, 1.553344], [-3.141593, 3.141593]]
 timeout_s: 30
 log_interval_s: 1
 max_distance_m: 1
 max_rotation_rad: 2.0
-start_workspace_m: [[-0.02, 1], [-1, 1], [0, 1]]
+# 按现场要求放宽归位起点X/Z下界，保留有限边界；策略工作区和归位目标不变。
+# 这不是碰撞/路径验收，仍由现场确认，且检查最大关节/空间/旋转距离。
+start_workspace_m: [[-0.10, 1], [-1, 1], [-0.10, 1]]
 control_ready_timeout_s: 2
 poll_s: 0.02
