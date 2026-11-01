@@ -200,12 +200,22 @@ class GUIController:
                 self.condition.wait(0.25)
 
     def _reset_confirm(self):
-        with self.condition:
-            self.ready = False
-            self.phase = "awaiting_reset"
-        self._wait(lambda: self.ready)
-        if self.config["backend"] == "piperx":
-            self.phase = "homing"
+        while True:
+            with self.condition:
+                self.ready = False
+                self.phase = "awaiting_reset"
+            self._wait(lambda: self.ready)
+            if self.config["backend"] == "piperx":
+                try:
+                    # 起点不合法时只读拒绝，保留RPC等待；不让学习器退出并重新加载模型。
+                    self.env.device.check_home_start()
+                except ValueError as error:
+                    with self.condition:
+                        self.error = str(error) + "；现场处理后可再次点击确认归位。"
+                    continue
+                self.phase = "homing"
+            self.error = ""
+            return
 
     def handle(self, request):
         operation = request["operation"]
@@ -225,6 +235,7 @@ class GUIController:
             self.env = PiperXEnv(
                 copy.deepcopy(self.config), self.allow_motion, reset_confirm=self._reset_confirm
             )
+            self.latest_obs = self.env.get_observation()
             return {
                 "status": "success",
                 "env_id": self.env_id,

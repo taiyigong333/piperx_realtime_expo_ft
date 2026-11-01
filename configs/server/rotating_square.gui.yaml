@@ -32,6 +32,7 @@ num_data: 0
 checkpoint_interval: 2000
 offline_ratio: 0.0 # 成功示教初始化在线buffer；不是禁用离线示教。
 step_interval: 30
+wandb_finish_timeout_s: 15 # 收尾上传最多等待15秒，未上传数据保留在本地。
 wandb_mode: online
 wandb_entity: gongcj-beijing
 wandb_base_url: https://api.wandb.ai

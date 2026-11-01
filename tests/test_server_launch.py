@@ -99,3 +99,22 @@ def test_new_empty_checkpoint_allowed_existing_data_preserved(monkeypatch, tmp_p
     with pytest.raises(FileExistsError):
         agents.initialize_checkpoint_dir(directory, keep_period=None, overwrite=False, resume=False)
     assert checkpoint.read_text() == "must survive"
+
+
+def test_gui_wandb_finish_timeout_preserves_other_settings(monkeypatch, tmp_path):
+    wandb = types.ModuleType("wandb")
+    received = {}
+
+    def initialize(**kwargs):
+        received.update(kwargs)
+        wandb.log = lambda *a, **kw: None
+        return "run"
+
+    wandb.init, wandb.log = initialize, None
+    wandb.Settings = types.SimpleNamespace
+    monkeypatch.setitem(sys.modules, "wandb", wandb)
+    _install_local_log({"output_dir": str(tmp_path), "run_name": "test", "episode_review": True,
+                        "wandb_finish_timeout_s": 12}, "rl")
+    wandb.init(settings={"init_timeout": 90})
+    assert received["settings"].finish_timeout == 12
+    assert received["settings"].init_timeout == 90

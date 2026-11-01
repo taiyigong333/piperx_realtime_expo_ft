@@ -262,3 +262,44 @@ def test_restore_ignores_uncommitted_staging(tmp_path):
     processor = Processor()
     restore_reviewed(processor, tmp_path, 2)
     assert processor.transitions == [] and pending.exists()
+
+
+def test_invalid_home_start_can_retry_without_restarting_learner(tmp_path):
+    from types import SimpleNamespace
+
+    controller = GUIController(load_config("configs/client/gui.mock.yaml"), tmp_path)
+    controller.config["backend"] = "piperx"
+    attempts = []
+    errors = []
+
+    def check_start():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise ValueError("归位起点超出允许工作空间：X=-0.080000m")
+
+    controller.env = SimpleNamespace(device=SimpleNamespace(check_home_start=check_start))
+
+    def confirm():
+        try:
+            controller._reset_confirm()
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=confirm)
+    worker.start()
+    try:
+        wait_for(lambda: controller.phase == "awaiting_reset")
+        controller.command("ready", {})
+        wait_for(lambda: bool(controller.error) and controller.phase == "awaiting_reset")
+        assert not controller.stop_event.is_set() and worker.is_alive()
+        assert "X=-0.080000m" in controller.state()["error"]
+        controller.command("ready", {})
+        worker.join(2)
+        assert not worker.is_alive() and not errors
+        assert len(attempts) == 2 and controller.phase == "homing" and not controller.error
+    finally:
+        controller.stop_event.set()
+        with controller.condition:
+            controller.condition.notify_all()
+        worker.join(2)
+        controller.heartbeat_thread.join(1)

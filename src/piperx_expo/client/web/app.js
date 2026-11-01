@@ -389,6 +389,7 @@ function render(s) {
   $("action-title").textContent = prompt[0];
   $("action-hint").textContent = prompt[1];
   if (s.error) notice(s.error, true);
+  else if ($("notice").classList.contains("error")) notice("");
   if (!selected) {
     $("scrubber").max = ep?.steps || 0;
     $("scrubber").value = ep?.steps || 0;

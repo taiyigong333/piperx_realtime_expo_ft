@@ -41,6 +41,43 @@ def _rotation(rpy):
                      [sz*cy, sz*sy*sx+cz*cx, sz*sy*cx-cz*sx], [-sy, cy*sx, cy*cx]])
 
 
+def _home_feedback(device, getter, shape):
+    if device.reset_cancel.is_set():
+        raise InterruptedError("归位已停止，禁止继续发送目标")
+    value = getter()
+    if (value is None or not 0 <= time.time() - value.timestamp < device.config["feedback_timeout_s"]
+            or value.hz <= 0):
+        raise RuntimeError("归位反馈缺失或过期")
+    array = np.asarray(value.msg, dtype=float)
+    if array.shape != shape or not np.isfinite(array).all():
+        raise RuntimeError("归位反馈格式无效")
+    return array, value.timestamp
+
+
+def check_home_start(device, home):
+    """只读检查起点，允许GUI在人工调整后重新确认；不会使能或切换控制模式。"""
+    arm = device.arm
+    target = np.asarray(home["joint_positions_rad"], dtype=float)
+    limits = np.asarray(home["joint_limits_rad"], dtype=float)
+    joints, _ = _home_feedback(device, arm.get_joint_angles, (6,))
+    current, _ = _home_feedback(device, arm.get_flange_pose, (6,))
+    tolerance = home["initial_joint_tolerance_rad"]
+    if np.any(joints < limits[:, 0] - tolerance) or np.any(joints > limits[:, 1] + tolerance):
+        raise ValueError("归位起点关节超限")
+    if np.max(np.abs(joints - target)) > home["max_joint_delta_rad"]:
+        raise ValueError("归位关节距离超限，需要现场调整")
+    bounds = np.asarray(home["start_workspace_m"])
+    if np.any(current[:3] < bounds[:, 0]) or np.any(current[:3] > bounds[:, 1]):
+        axes = "XYZ"
+        details = "；".join(
+            f"{axes[i]}={current[i]:.6f}m，允许[{bounds[i, 0]:.6f}, {bounds[i, 1]:.6f}]m"
+            for i in range(3) if current[i] < bounds[i, 0] or current[i] > bounds[i, 1]
+        )
+        raise ValueError(f"归位起点超出允许工作空间：{details}。未使能、未发送归位目标；"
+                         "请现场检查姿态/坐标系与home_config，不能跳过工作空间检查")
+    return target, joints, current
+
+
 def fixed_joint_home(device, home):
     arm, cancel, config = device.arm, device.reset_cancel, device.config
 
@@ -49,15 +86,7 @@ def fixed_joint_home(device, home):
             raise InterruptedError("归位已停止，禁止继续发送目标")
 
     def feedback(getter, shape):
-        check_cancel()
-        value = getter()
-        if (value is None or not 0 <= time.time() - value.timestamp < config["feedback_timeout_s"]
-                or value.hz <= 0):
-            raise RuntimeError("归位反馈缺失或过期")
-        array = np.asarray(value.msg, dtype=float)
-        if array.shape != shape or not np.isfinite(array).all():
-            raise RuntimeError("归位反馈格式无效")
-        return array, value.timestamp
+        return _home_feedback(device, getter, shape)
 
     def status():
         check_cancel()
@@ -87,18 +116,7 @@ def fixed_joint_home(device, home):
                 raise TimeoutError("归位控制模式未就绪，禁止发送目标")
             cancel.wait(home["poll_s"])
 
-    target = np.asarray(home["joint_positions_rad"], dtype=float)
-    limits = np.asarray(home["joint_limits_rad"], dtype=float)
-    joints, _ = feedback(arm.get_joint_angles, (6,))
-    current, _ = feedback(arm.get_flange_pose, (6,))
-    tolerance = home["initial_joint_tolerance_rad"]
-    if np.any(joints < limits[:, 0] - tolerance) or np.any(joints > limits[:, 1] + tolerance):
-        raise ValueError("归位起点关节超限")
-    if np.max(np.abs(joints - target)) > home["max_joint_delta_rad"]:
-        raise ValueError("归位关节距离超限，需要现场调整")
-    bounds = np.asarray(home["start_workspace_m"])
-    if np.any(current[:3] < bounds[:, 0]) or np.any(current[:3] > bounds[:, 1]):
-        raise ValueError("归位起点超出允许工作空间")
+    target, joints, current = check_home_start(device, home)
     pose = np.asarray(arm.fk(target.tolist()), dtype=float)
     bounds = np.asarray(config["workspace_m"])
     if (pose.shape != (6,) or not np.isfinite(pose).all()

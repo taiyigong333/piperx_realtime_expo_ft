@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import logging
@@ -302,10 +303,15 @@ def main(_):
         if FLAGS.checkpoint_model and step != last_checkpoint:
             save_training_checkpoint()
         env.client._call_operation("session_complete", {"env_id": env.env_id})
+    except BaseException:
+        # 先输出根因再收尾，避免上传等待或二次中断掩盖最初的客户端错误。
+        logging.exception("GUI采集/训练失败，正在关闭连接与日志")
+        raise
     finally:
         sampler.close()
         env.client.close()
-        wandb.finish()
+        # 异常退出必须记录失败，不能被默认finish(exit_code=0)标记为训练成功。
+        wandb.finish(exit_code=1 if sys.exc_info()[0] else 0)
 
 
 if __name__ == "__main__":

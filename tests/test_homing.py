@@ -149,3 +149,15 @@ def test_environment_close_interrupts_reset_and_fault_latches():
     finally:
         env.close()
         worker.join(2)
+
+
+def test_workspace_rejection_reports_measurement_and_never_enables():
+    from piperx_expo.client.homing import check_home_start
+
+    device, home = device_and_home()
+    device.arm.get_flange_pose = lambda: device.arm.packet([-0.08, 0, -0.01, 0, 0, 0])
+    with pytest.raises(ValueError, match=r"X=-0.080000m.*Z=-0.010000m.*未使能"):
+        check_home_start(device, home)
+    with pytest.raises(ValueError, match="起点超出"):
+        fixed_joint_home(device, home)
+    assert not device.arm.commands

@@ -117,6 +117,11 @@ class PiperXDevices:
             self.read_state(), {k: v[1] for k, v in frames.items()}, self.config["language_instruction"]
         )
 
+    def check_home_start(self):
+        from piperx_expo.client.homing import check_home_start, load_home
+
+        check_home_start(self, load_home(self.config))
+
     def reset(self, confirmed=False):
         from piperx_expo.client.homing import fixed_joint_home, load_home
 

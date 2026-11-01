@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import runpy
 import sys
@@ -12,6 +13,10 @@ from piperx_expo.config import ROOT, load_config, resolve_path
 
 
 def validate(config, stage):
+    if config.get("episode_review"):
+        timeout = float(config.get("wandb_finish_timeout_s", 15))
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("wandb_finish_timeout_s 必须为有限正秒数")
     batch_size = config.get("rl_batch_size", config["batch_size"]) if stage == "rl" else config["batch_size"]
     for key in ("dataset_path", "base_weights" if stage == "sft" else "rtc_weights"):
         if not config.get(key):
@@ -150,6 +155,15 @@ def _install_local_log(config, stage):
 
     def initialize(*args, **kwargs):
         nonlocal original
+        if config.get("episode_review"):
+            # GUI停止不能被日志上传无限阻塞；超时后W&B保留本地数据供后续sync。
+            settings = kwargs.get("settings")
+            if settings is None:
+                settings = wandb.Settings()
+            elif isinstance(settings, dict):
+                settings = wandb.Settings(**settings)
+            settings.finish_timeout = float(config.get("wandb_finish_timeout_s", 15))
+            kwargs["settings"] = settings
         run = original_init(*args, **kwargs)
         # wandb.init会重新绑定wandb.log，必须在init之后安装本地实时日志。
         original = wandb.log
