@@ -100,6 +100,7 @@ $("ready").onclick = () => {
 $("stop").onclick = () => command("stop");
 $("server-start").onclick = () => command("server_start");
 $("server-stop").onclick = () => command("server_stop");
+$("recover-enable").onclick = () => command("recover_enable", {motion_confirmed: $("motion-confirm").checked});
 $("server-refresh").onclick = () => command("server_status");
 $("end").onclick = () => command("end");
 $("review-form").onsubmit = (e) => {
@@ -237,6 +238,11 @@ function render(s) {
   const ep = s.episode,
     phase = s.phase;
   const remote = s.remote_server || { enabled: false };
+  const hold = s.arm_hold || {};
+  $("recover-enable").hidden = s.backend !== "piperx";
+  $("recover-enable").disabled = !s.can_start || hold.running;
+  $("hold-status").textContent = hold.error || ({enabling: "正在恢复使能", holding: "已使能，保持当前位置",
+    released: "已交接学习器", stopped: "保持已停止"}[hold.phase] || "");
   $("remote-server").hidden = !remote.enabled;
   if (remote.enabled) {
     const names = {idle: "尚未启动", unknown: "状态未确认", loading: "模型初始化中",
@@ -282,7 +288,7 @@ function render(s) {
   $("ready").hidden = phase !== "awaiting_reset";
   $("ready").disabled = !!selected;
   $("end").hidden = phase !== "running";
-  $("stop").disabled = !remote.running && !remote.busy && ["idle", "stopped", "fault", "completed"].includes(
+  $("stop").disabled = !hold.running && !remote.running && !remote.busy && ["idle", "stopped", "fault", "completed"].includes(
     phase,
   );
   $("motion-label").hidden = s.backend !== "piperx";

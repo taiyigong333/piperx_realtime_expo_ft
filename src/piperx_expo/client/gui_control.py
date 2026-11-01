@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from piperx_expo.client.arm_hold import ArmHold
 from piperx_expo.client.environment import PiperXEnv
 from piperx_expo.client.recording import EpisodeRecorder
 from piperx_expo.client.rpc import run_client
@@ -27,6 +28,7 @@ class GUIController:
         self.phase = "idle"
         self.error = ""
         self.env = None
+        self.arm_hold = None
         self.env_id = "browser_review"
         self.recorder = None
         self.connection = None
@@ -57,6 +59,7 @@ class GUIController:
             self.last_heartbeat = time.monotonic()
             meta = self.recorder.snapshot() if self.recorder else None
             return {
+                "arm_hold": self.arm_hold.snapshot() if self.arm_hold else {"running": False, "phase": "idle"},
                 "phase": self.phase,
                 "error": self.error,
                 "backend": self.config["backend"],
@@ -232,6 +235,8 @@ class GUIController:
                 raise ValueError("动作规范不符")
             if self.env is not None:
                 raise RuntimeError("禁止在已建立会话中重建硬件")
+            if self.arm_hold:
+                self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] == "holding")
             self.env = PiperXEnv(
                 copy.deepcopy(self.config), self.allow_motion, reset_confirm=self._reset_confirm
             )
@@ -352,6 +357,15 @@ class GUIController:
                 self.remote_server.request(action.removeprefix("server_"))
         elif action == "start":
             self.start(bool(values.get("demo", False)), values.get("motion_confirmed") is True)
+        elif action == "recover_enable":
+            with self.condition:
+                if self.config["backend"] != "piperx" or not self.allow_motion or values.get("motion_confirmed") is not True:
+                    raise ValueError("恢复使能需要真机启动许可及现场运动确认")
+                if self.worker and self.worker.is_alive():
+                    raise ValueError("请先停止当前学习器连接会话，再恢复使能")
+                if self.arm_hold and self.arm_hold.thread.is_alive():
+                    raise ValueError("恢复使能/保持已在运行")
+                self.arm_hold = ArmHold(copy.deepcopy(self.config), lambda: self.last_heartbeat)
         elif action == "ready":
             with self.condition:
                 if self.phase != "awaiting_reset" or self.ready:
@@ -377,6 +391,8 @@ class GUIController:
             self.phase = "fault" if error else "stopped"
             self.stop_event.set()
             self.condition.notify_all()
+        if self.arm_hold:
+            self.arm_hold.close()
         # 先切断控制，再等IO和连接退出；复核等待不会占用env锁。
         if self.env is not None:
             self.env.close()
