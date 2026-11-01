@@ -12,6 +12,8 @@
 
 ## 本轮最新修改（2026-11-01）
 
+当前覆盖（用户最新要求）：CLI/GUI两份旋转方块配置均为`edit_action_xyzg: false`，关闭旋转屏蔽，允许edit修改XYZ/RPY/夹爪；省略字段的论文默认true仍保留。核对原batch2345训练继承链、LeRobot字段和converter后确认：当前OpenPI state为末端XYZ/RPY+夹爪，不是六关节角；RL actor/critic/replay保持同一state表示，VLA内部动作前六维为delta。六关节角仅用于固定归位。下方先前“默认true”描述指未配置时的默认值，不代表本轮启用配置。本轮验证：根环境46 passed、1 skipped，模拟RPC通过；server CPU检查明确报告`action_space=cartesian_position`、`edit_action_xyzg=false`，原SFT参数元数据、右腕布局、绝对/delta往返及RTC前缀检查通过。未执行真实运动、完整模型训练或最终RTC权重恢复。
+
 功能提交`739d1b4`已推送main并同步4090和piperx，双机工作区干净；piperx客户端Python3.10 locked同步、编译及模拟RPC通过，4090部署后根测试46 passed、1 skipped、模拟RPC和server GPU小算子验证通过。现场忽略配置和数据/权重保持原状；未启动控制进程、真实运动或在线RL。
 
 - 数据基准是data-transfer的`piperx_to_openpi_vla@3a26229`；旧OpenPI部署只参考归位。统一OpenCV INTER_AREA/JPEG解码，去除额外RPY折回/unwrap；原394条44721帧导入集全量数值与源哈希一致，视频抽18帧、原归一化通过。
