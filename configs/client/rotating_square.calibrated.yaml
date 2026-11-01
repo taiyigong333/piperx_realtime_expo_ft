@@ -25,3 +25,8 @@ success_detector_config:
   consecutive_steps: 6 # 按实际动作步累计，重复RPC不能加速触发。
 manual_reset: true
 home_config: configs/client/home.openpi.yaml
+# 仅由本机GUI管理；复用机器人电脑已有的有线SSH连接，不保存密码/私钥。
+remote_server:
+  ssh_host: gh4090piper-wired
+  project_dir: /data/gcj_data/rl/real_time_expo_ft/code
+  config: configs/server/rotating_square.gui.yaml

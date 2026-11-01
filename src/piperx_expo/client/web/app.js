@@ -6,6 +6,7 @@ let current = null,
   history = [],
   first = true,
   lastEpisode = null,
+  lastPhase = null,
   replayFrame = 0,
   polling = false;
 const phaseNames = {
@@ -97,6 +98,9 @@ $("ready").onclick = () => {
   command("ready");
 };
 $("stop").onclick = () => command("stop");
+$("server-start").onclick = () => command("server_start");
+$("server-stop").onclick = () => command("server_stop");
+$("server-refresh").onclick = () => command("server_status");
 $("end").onclick = () => command("end");
 $("review-form").onsubmit = (e) => {
   e.preventDefault();
@@ -232,6 +236,26 @@ function render(s) {
   current = s;
   const ep = s.episode,
     phase = s.phase;
+  const remote = s.remote_server || { enabled: false };
+  $("remote-server").hidden = !remote.enabled;
+  if (remote.enabled) {
+    const names = {idle: "尚未启动", unknown: "状态未确认", loading: "模型初始化中",
+      listening: s.connected ? "学习器已连接" : "可连接学习器", stopping: "正在停止", stopped: "已停止",
+      completed: "训练结束", failed: "启动失败或异常退出"};
+    $("server-phase").textContent = remote.busy ? "正在处理操作" : (names[remote.phase] || remote.phase);
+    $("server-start").disabled = remote.busy || remote.running;
+    $("server-stop").disabled = remote.phase === "idle" && !remote.busy;
+    $("server-hint").textContent = remote.error || (remote.mock
+      ? "当前为管理链路模拟服务，不加载模型、不训练。"
+      : "先启动服务器 RL，再连接学习器并确认现场归位。停止会先锁定本机机械臂。模型初始化可能需要数分钟。");
+    $("server-run").textContent = remote.run_name || "每次启动会自动创建独立 run";
+    const log = remote.log_tail || "暂无日志";
+    if ($("server-log").textContent !== log) $("server-log").textContent = log;
+  }
+  if (phase !== lastPhase && ["stopped", "fault", "completed"].includes(phase)) {
+    $("motion-confirm").checked = false;
+  }
+  lastPhase = phase;
   $("phase").textContent = phaseNames[phase] || phase;
   $("mode").textContent = s.backend === "mock" ? "模拟环境" : "PIPER-X · 真机";
   $("connection").textContent = s.demo
@@ -252,12 +276,13 @@ function render(s) {
   $("review-badge").textContent = ep
     ? statusNames[ep.status] || ep.status
     : "等待轨迹";
-  $("start").hidden = phase !== "idle";
+  $("start").hidden = !s.can_start || !["idle", "stopped", "fault", "completed"].includes(phase);
+  $("start").disabled = remote.stopping || remote.phase === "stopping";
   $("demo").hidden = s.backend !== "mock" || phase !== "idle";
   $("ready").hidden = phase !== "awaiting_reset";
   $("ready").disabled = !!selected;
   $("end").hidden = phase !== "running";
-  $("stop").disabled = ["idle", "stopped", "fault", "completed"].includes(
+  $("stop").disabled = !remote.running && !remote.busy && ["idle", "stopped", "fault", "completed"].includes(
     phase,
   );
   $("motion-label").hidden = s.backend !== "piperx";
@@ -336,7 +361,7 @@ function render(s) {
             ? "等待服务器入池确认；请勿重复提交。"
             : "提交前不会写入学习器经验池。";
   const prompts = {
-    idle: ["准备开始采集", "先启动复核模式服务器，再连接客户端。"],
+    idle: ["准备开始采集", remote.enabled ? "点击启动服务器 RL，然后连接学习器；模型准备完成后会提示归位。" : "先启动复核模式服务器，再连接客户端。"],
     connecting: ["正在等待学习器", "模型准备完成后会请求创建环境。"],
     awaiting_reset: [
       "请复位方块并检查归位路径",
@@ -353,8 +378,8 @@ function render(s) {
       "等待学习器准备下一回合",
       "模型更新结束后将提示现场复位。",
     ],
-    stopped: ["会话已停止", "重新启动客户端服务后可建立新会话。"],
-    fault: ["会话异常停止", "检查错误和现场状态后重新启动客户端。"],
+    stopped: ["会话已停止", "检查现场，重新启动服务器并确认运动，再连接学习器建立新会话。"],
+    fault: ["会话异常停止", "检查错误和现场状态，等待停止完成后再建立新会话。"],
     completed: [
       "本次采集与训练会话已完成",
       "已达到学习器预算；轨迹与复核结果保留在档案中。",

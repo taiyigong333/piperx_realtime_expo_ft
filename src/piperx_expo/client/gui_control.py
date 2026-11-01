@@ -11,6 +11,7 @@ import numpy as np
 from piperx_expo.client.environment import PiperXEnv
 from piperx_expo.client.recording import EpisodeRecorder
 from piperx_expo.client.rpc import run_client
+from piperx_expo.client.remote_server import RemoteServer
 from piperx_expo.review import PROTOCOL, observation_state, resolve_review
 
 
@@ -37,6 +38,7 @@ class GUIController:
         self.end_requested = False
         self.demo = False
         self.last_heartbeat = time.monotonic()
+        self.remote_server = RemoteServer(self.config["remote_server"]) if self.config.get("remote_server") else None
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
         self.heartbeat_thread.start()
 
@@ -74,7 +76,9 @@ class GUIController:
                 "detector": self.config.get("success_detector_config"),
                 "episode": meta,
                 "connected": self.connection is not None,
+                "can_start": self.worker is None or not self.worker.is_alive(),
                 "state": observation_state(self.latest_obs).tolist() if self.latest_obs else None,
+                "remote_server": self.remote_server.snapshot() if self.remote_server else {"enabled": False},
             }
 
     def settings(self, values):
@@ -106,13 +110,31 @@ class GUIController:
             self.config.update(values)
 
     def start(self, demo=False, motion_confirmed=False):
+        if self.stop_event.is_set():
+            # 旧看门狗线程必须先退出，才能清除停止事件并创建全新硬件会话。
+            self.heartbeat_thread.join(timeout=1)
         with self.condition:
-            if self.worker is not None:
-                raise ValueError("此客户端已启动过会话；停止后请重启服务以完成现场检查")
+            if self.remote_server:
+                remote = self.remote_server.snapshot()
+                if remote.get("stopping") or remote.get("phase") == "stopping":
+                    raise ValueError("服务器仍在停止，请等待后再建立新会话")
+            if self.worker is not None and self.worker.is_alive():
+                raise ValueError("上一会话尚未退出，请等待停止完成")
             if demo and self.config["backend"] != "mock":
                 raise ValueError("模拟演示只支持mock配置")
             if self.config["backend"] == "piperx" and not (self.allow_motion and motion_confirmed):
                 raise ValueError("真机需要启动参数--allow-motion，并勾选现场运动确认")
+            if self.stop_event.is_set():
+                if self.heartbeat_thread.is_alive():
+                    raise ValueError("上一会话停止检查尚未结束")
+                self.stop_event.clear()
+                self.error = ""
+                self.env = self.connection = self.recorder = self.latest_obs = self.pending_action = None
+                self.ready = self.end_requested = False
+                self.decision = None
+                self.last_heartbeat = time.monotonic()
+                self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
+                self.heartbeat_thread.start()
             self.demo = demo
             self.phase = "connecting"
             self.worker = threading.Thread(target=self._run, daemon=True)
@@ -308,7 +330,16 @@ class GUIController:
             self.condition.notify_all()
 
     def command(self, action, values):
-        if action == "start":
+        if action in {"server_start", "server_stop", "server_status"}:
+            if not self.remote_server:
+                raise ValueError("此配置未启用远程服务器管理")
+            if values:
+                raise ValueError("服务器管理不接受覆盖SSH或启动命令")
+            if action == "server_stop":
+                self.stop()  # 先停止本地运动，再发远程停止请求。
+            else:
+                self.remote_server.request(action.removeprefix("server_"))
+        elif action == "start":
             self.start(bool(values.get("demo", False)), values.get("motion_confirmed") is True)
         elif action == "ready":
             with self.condition:
@@ -340,6 +371,8 @@ class GUIController:
             self.env.close()
         if self.connection is not None:
             self.connection.close()
+        if self.remote_server:
+            self.remote_server.request("stop")
 
     def close(self):
         if self.env is not None and not self.env.closed.is_set():

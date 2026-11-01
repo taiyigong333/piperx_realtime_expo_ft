@@ -1068,3 +1068,14 @@ footer > span:first-child {
   color: #335647;
   font: inherit;
 }
+
+.remote-server { margin-bottom: 20px; padding-bottom: 16px; }
+.remote-server p, .remote-server > div.mono, .remote-server details { margin: 12px 20px; }
+.remote-server summary { cursor: pointer; color: #335647; }
+.remote-server pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: #f4f7f5; padding: 12px; font-size: 11px; }
+.remote-server .card-title { flex-wrap: wrap; gap: 12px; }
+.remote-server .action-buttons { flex-wrap: wrap; width: 100%; }
+.remote-server .action-buttons .text-button { flex: 0 0 100%; text-align: left; white-space: nowrap; }
+.remote-server .action-buttons .button { flex: 1; min-width: 0; padding: 10px; white-space: nowrap; }
+.remote-server > div.mono { white-space: normal; overflow-wrap: anywhere; }

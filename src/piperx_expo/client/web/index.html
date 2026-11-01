@@ -52,6 +52,19 @@
         </div>
         <div id="notice" class="notice" role="status" aria-live="polite"></div>
         <section id="view-run" class="view">
+          <article id="remote-server" class="card remote-server" hidden>
+            <div class="card-title">
+              <span>4090 训练服务器 <span id="server-phase" class="badge">读取状态</span></span>
+              <div class="action-buttons">
+                <button id="server-refresh" class="text-button">刷新状态</button>
+                <button id="server-start" class="button primary">启动服务器 RL</button>
+                <button id="server-stop" class="button danger-outline">停止服务器 RL</button>
+              </div>
+            </div>
+            <p id="server-hint">从机器人电脑管理服务器，每次启动创建独立训练记录。</p>
+            <div id="server-run" class="mono"></div>
+            <details><summary>服务器日志</summary><pre id="server-log">暂无日志</pre></details>
+          </article>
           <div class="session-strip">
             <div>
               <span class="label">当前阶段</span

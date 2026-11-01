@@ -12,7 +12,7 @@
 
 ## 本轮最新修改（2026-11-01）
 
-当前覆盖（用户最新要求）：CLI/GUI两份旋转方块配置均为`edit_action_xyzg: false`，关闭旋转屏蔽，允许edit修改XYZ/RPY/夹爪；省略字段的论文默认true仍保留。核对原batch2345训练继承链、LeRobot字段和converter后确认：当前OpenPI state为末端XYZ/RPY+夹爪，不是六关节角；RL actor/critic/replay保持同一state表示，VLA内部动作前六维为delta。六关节角仅用于固定归位。下方先前“默认true”描述指未配置时的默认值，不代表本轮启用配置。本轮验证：根环境46 passed、1 skipped，模拟RPC通过；server CPU检查明确报告`action_space=cartesian_position`、`edit_action_xyzg=false`，原SFT参数元数据、右腕布局、绝对/delta往返及RTC前缀检查通过。未执行真实运动、完整模型训练或最终RTC权重恢复。
+当前覆盖（用户最新要求）：CLI/GUI两份服务器配置均恢复`edit_action_xyzg: true`，屏蔽edit的旋转编辑。机器人GUI新增服务器RL启动/停止/状态/日志，使用既有有线SSH别名`gh4090piper-wired`；每次启动自动生成独立run与配置快照，无需手工SSH/tmux。停止先锁定本机设备再停止专属服务器任务；停止后可在同一页面重新确认现场、建立全新会话。本轮验证只用模拟服务，正式“启动服务器 RL”会加载配置指定的真实模型；当前OpenPI/RL state仍为末端XYZ/RPY+夹爪。详见[GUI远程训练管理](docs/GUI远程训练管理.md)。验证结果：本地52 passed、4 skipped（JAX及Linux /proc项）；4090隔离副本55 passed、1 skipped。模拟RPC、Ruff、JS语法通过。机器人Python3.10 GUI经既有有线SSH实际启动/停止4090的独立18107端口mock服务，页面显示就绪与日志，停止后独立确认running=false、phase=stopped、exit_code=-2；临时GUI和转发均已关闭。未加载完整模型、未启动真实RL或真机运动。
 
 功能提交`739d1b4`已推送main并同步4090和piperx，双机工作区干净；piperx客户端Python3.10 locked同步、编译及模拟RPC通过，4090部署后根测试46 passed、1 skipped、模拟RPC和server GPU小算子验证通过。现场忽略配置和数据/权重保持原状；未启动控制进程、真实运动或在线RL。
 

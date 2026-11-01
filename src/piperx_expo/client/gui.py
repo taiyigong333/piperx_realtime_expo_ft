@@ -178,6 +178,11 @@ def main():
         server.server_close()
         if controller.worker:
             controller.worker.join(timeout=5)
+        if controller.remote_server:
+            try:
+                controller.remote_server.shutdown()
+            except Exception:
+                logging.exception("远程学习器停止未确认，请检查服务器管理状态")
 
 
 if __name__ == "__main__":
