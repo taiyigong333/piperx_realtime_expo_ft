@@ -16,6 +16,12 @@ from piperx_expo.client.recording import EpisodeRecorder
 from piperx_expo.config import load_config
 
 
+# 数字仅作为原命令的别名，继续复用同一套状态检查和现场运动确认。
+COMMAND_ALIASES = {"1": "READY", "2": "end", "3": "s", "4": "f", "5": "stop", "0": "quit"}
+COMMAND_HELP = ("命令（输入后回车）：1/READY=现场确认/归位开始；2/end=结束本条；"
+                "3/s=成功；4/f=失败；5/stop=急停并标失败；0/quit=退出任务")
+
+
 class CLIController(GUIController):
     def __init__(self, config, root, allow_motion=False):
         config = copy.deepcopy(config)
@@ -94,7 +100,7 @@ class CLIController(GUIController):
                     if not self.episode_stop.is_set():
                         raise
                     # 归位被打断时尚未开始录制，不虚构零动作轨迹；仍等待新一次READY。
-                    logging.warning("归位被停止；处理现场后重新输入READY")
+                    logging.warning("归位被停止；处理现场后重新输入1或READY")
         if operation in {"step", "get_observation"} and self.episode_stop.is_set():
             return self._finish_interrupted(missing_feedback=self.pending_action is not None)
         if operation == "step":
@@ -154,7 +160,7 @@ def main():
     session = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f_cli")
     from pathlib import Path
     controller = CLIController(config, Path(args.record_dir) / session, args.allow_motion)
-    print("命令：READY=现场确认/归位开始；s=成功；f=失败；end=结束本条；stop=急停并标失败；quit=退出任务", flush=True)
+    print(COMMAND_HELP, flush=True)
     controller.start(prepare_only=True)
     previous = None
     previous_signal = signal.signal(signal.SIGINT, lambda *_: controller.interrupt_episode())
@@ -170,6 +176,7 @@ def main():
             if not line:
                 break
             command = line.strip()
+            command = COMMAND_ALIASES.get(command, command)
             try:
                 if command == "READY":
                     controller.command("ready", {"motion_confirmed": True})
@@ -182,7 +189,7 @@ def main():
                 elif command == "quit":
                     break
                 else:
-                    print("请输入READY、s、f、end、stop或quit", flush=True)
+                    print(COMMAND_HELP, flush=True)
             except ValueError as error:
                 print(str(error), flush=True)
         if controller.error and controller.phase in {"fault", "stopped"}:
