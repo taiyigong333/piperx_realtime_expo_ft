@@ -38,7 +38,8 @@ import openpi.training.sharding as openpi_sharding
 from train_pi_robo import FLAGS
 from piperx_expo.client.recording import write_json
 from piperx_expo.review import PROTOCOL
-from piperx_expo.server.review_loop import DeferredBatch, collect_episode, restore_reviewed, update_credit
+from piperx_expo.server.review_loop import DeferredBatch, collect_episode, evaluate_session, restore_reviewed, update_credit
+from piperx_expo.server.model_store import checkpoint_info, readonly_checkpoint_manager
 from piperx_expo.server.policy_warmup import warmup_policy
 from piperx_expo.server.progress import TrainingProgress
 from piperx_expo.server.session_control import StopAfterEpisode
@@ -50,6 +51,7 @@ def main(_):
     progress = TrainingProgress()
     progress.update("initializing")
     experiment = load_config(os.environ["PIPERX_EXPERIMENT_CONFIG"])
+    inference_only = experiment.get("inference_only") is True
     assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
 
     if FLAGS.batch_size % jax.device_count() != 0:
@@ -69,15 +71,18 @@ def main(_):
     checkpoint_dir = os.path.join(log_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    checkpoint_dir_path = epath.Path(checkpoint_dir)
-    checkpoint_manager, resuming = initialize_checkpoint_dir(
-        checkpoint_dir_path,
-        keep_period=FLAGS.keep_period,
-        overwrite=FLAGS.overwrite,
-        resume=FLAGS.resume,
-    )
+    if inference_only:
+        source = checkpoint_info(experiment["inference_checkpoint_dir"], experiment["inference_checkpoint_step"])
+        checkpoint_manager = readonly_checkpoint_manager(source["checkpoint_dir"])
+        resuming = True  # 完整恢复actor/critic/edit/target；不从RTC基线重新初始化。
+        checkpoint_dir_path = epath.Path(log_dir)
+    else:
+        checkpoint_dir_path = epath.Path(checkpoint_dir)
+        checkpoint_manager, resuming = initialize_checkpoint_dir(
+            checkpoint_dir_path, keep_period=FLAGS.keep_period, overwrite=FLAGS.overwrite, resume=FLAGS.resume,
+        )
 
-    init_wandb(checkpoint_dir_path, resuming, FLAGS.project_name, FLAGS.run_name)
+    init_wandb(checkpoint_dir_path, resuming and not inference_only, FLAGS.project_name, FLAGS.run_name)
     wandb.config.update(FLAGS.flag_values_dict(), allow_val_change=resuming)
 
     progress.update("loading_demonstrations")
@@ -186,15 +191,18 @@ def main(_):
 
     start_step = 0
     if resuming:
-        agent = restore_checkpoint(checkpoint_manager, agent)
+        agent = restore_checkpoint(checkpoint_manager, agent, step=source["step"] if inference_only else None)
         if hasattr(agent, "cache_infer_params"):
             agent = agent.cache_infer_params()
         steps = tuple(checkpoint_manager.all_steps())
         latest_step = max(steps) if steps else None
-        if latest_step is not None:
+        if inference_only:
+            start_step = source["step"]
+        elif latest_step is not None:
             start_step = latest_step
             logging.info("Resuming from step %d", start_step)
-        restore_reviewed(batch_processor, checkpoint_dir_path, latest_step)
+        if not inference_only:
+            restore_reviewed(batch_processor, checkpoint_dir_path, latest_step)
 
     sampler = AsyncChunkSampler(
         agent,
@@ -216,6 +224,8 @@ def main(_):
             raise
         finally:
             sampler.close()
+            if inference_only:
+                checkpoint_manager.close()
             wandb.finish(exit_code=1 if sys.exc_info()[0] else 0)
         return
 
@@ -224,7 +234,7 @@ def main(_):
     # dials in, and the agent build above is the slow part.
     train_env_creation_request = {
         "example_action": example_action,
-        "env_usage": "train",
+        "env_usage": "eval" if inference_only else "train",
         "video_dir": train_video_dir,
     }
     logging.info("Creating environment...")
@@ -236,8 +246,13 @@ def main(_):
         raise ValueError("此服务器只接受支持逐条复核协议的浏览器客户端")
     if FLAGS.update_type != "episode" or FLAGS.step_interval < 1 or FLAGS.num_updates:
         raise ValueError("复核驱动使用episode更新和step_interval，不支持其他更新触发方式")
-    warmup = env.client._call_operation("prepare_policy", {"env_id": env.env_id, "batch_training": True})
-    if warmup.get("batch_training") is not True:
+    warmup = env.client._call_operation("prepare_policy", {
+        "env_id": env.env_id, "batch_training": not inference_only,
+        "session_mode": "eval" if inference_only else "train",
+    })
+    if inference_only and warmup.get("session_mode") != "eval":
+        raise ValueError("客户端尚不支持只推理，请先更新GUI")
+    if not inference_only and warmup.get("batch_training") is not True:
         raise ValueError("客户端尚不支持整轮采集后训练，请先更新GUI再连接")
 
     def report_warmup(stage):
@@ -265,6 +280,21 @@ def main(_):
         env.client.close()
         wandb.finish(exit_code=1)
         raise
+
+    if inference_only:
+        try:
+            evaluate_session(env, sampler, agent, replan_steps=FLAGS.replan_steps,
+                             control_hz=FLAGS.config_task.control_hz, max_steps=FLAGS.max_steps,
+                             output_dir=log_dir, checkpoint_step=source["step"], on_stage=progress.update)
+        except BaseException as error:
+            progress.update("failed", error=str(error))
+            raise
+        finally:
+            sampler.close()
+            env.client.close()
+            checkpoint_manager.close()
+            wandb.finish(exit_code=1 if sys.exc_info()[0] else 0)
+        return
 
     audit_root = Path(checkpoint_dir) / "reviewed_episodes"
     accepted_episodes = sum(

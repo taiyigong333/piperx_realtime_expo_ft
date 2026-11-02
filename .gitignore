@@ -18,3 +18,9 @@ pris709*
 configs/local/
 ._*
 .DS_Store
+
+/models/
+
+/runs/
+
+/evaluations/

@@ -200,6 +200,9 @@ def saved_run(tmp_path, *, complete=True):
     (checkpoints / "wandb_id.txt").write_text("same-wandb-id")
     if complete:
         (checkpoints / "80/_CHECKPOINT_METADATA").write_text("{}")
+        for part in ("agent", "params"):
+            (checkpoints / "80" / part).mkdir()
+            (checkpoints / "80" / part / "_METADATA").write_text("{}")
         (checkpoints / "review_state_80.json").write_text(json.dumps({"credit": 2, "update_count": 3}))
     return manager, job_id, checkpoints
 
@@ -283,3 +286,38 @@ def test_resume_total_budget_is_absolute_and_must_exceed_saved_step(tmp_path, mo
     _, record = manager.record()
     assert yaml.safe_load(Path(record["config"]).read_text())["max_steps"] == 200
     assert record["resume_step"] == 80 and record["total_steps"] == 200
+
+
+def test_inference_uses_fixed_model_and_separate_outputs_without_resume(tmp_path, monkeypatch):
+    import piperx_expo.server.gui_service as service_module
+
+    manager, job_id, checkpoints = saved_run(tmp_path)
+    monkeypatch.setattr(manager, "status", lambda: {"running": False})
+    monkeypatch.setattr(service_module, "listening", lambda _: False)
+    monkeypatch.setattr(service_module, "process_ticks", lambda _: "123")
+    monkeypatch.setattr("piperx_expo.server.launch.validate", lambda *_: None)
+    monkeypatch.setattr(service_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=""))
+    calls = []
+    monkeypatch.setattr(service_module.subprocess, "Popen",
+                        lambda argv, **kw: calls.append(argv) or SimpleNamespace(pid=999, wait=lambda: 0))
+    source = tmp_path / "current.yaml"
+    source.write_text("run_name: ignored\n")
+    manager.start(str(source), resume_run=job_id, mode="eval", total_steps=5)
+    path, record = manager.record()
+    config = yaml.safe_load(Path(record["config"]).read_text())
+    assert config["inference_only"] and not config["checkpoint_model"]
+    assert config["inference_checkpoint_dir"] == str(checkpoints)
+    assert config["inference_checkpoint_step"] == 80 and config["max_steps"] == 5
+    assert config["output_dir"] == str(tmp_path / "evaluations")
+    assert record["resume_run"] is None and record["evaluation_source"]["run_id"] == job_id
+    monkeypatch.setattr(service_module.signal, "signal", lambda *_: None)
+    manager.worker(record["id"])
+    assert "--resume" not in calls[-1]
+    assert not any(r["id"] == record["id"] for r in manager.runs())
+
+
+def test_inference_does_not_need_training_review_state(tmp_path):
+    manager, job_id, checkpoints = saved_run(tmp_path)
+    (checkpoints / "review_state_80.json").unlink()
+    assert manager.resume_info(job_id, for_inference=True)[1] == 80
+    assert manager.runs()[0]["inferable"] and not manager.runs()[0]["resumable"]

@@ -16,6 +16,7 @@ import uuid
 import yaml
 
 from piperx_expo.config import ROOT, load_config, resolve_path
+from piperx_expo.server.model_store import checkpoint_info, inference_config, verify_model
 
 
 def write_json(path, value):
@@ -72,7 +73,7 @@ class ServiceManager:
         path = self.runtime / job_id / "process.json"
         return path, json.loads(path.read_text())
 
-    def resume_info(self, job_id):
+    def resume_info(self, job_id, *, for_inference=False):
         if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
             raise ValueError("续训实验ID无效")
         folder = self.runtime / job_id
@@ -84,14 +85,11 @@ class ServiceManager:
         if not output.is_absolute():
             output = self.root / output
         checkpoint = output / f"{config['run_name']}_rl" / "checkpoints"
-        steps = sorted(int(p.name) for p in checkpoint.glob("*")
-                       if p.is_dir() and p.name.isdigit())
-        if not steps:
-            raise ValueError("尚无已保存模型checkpoint，不能续训")
-        latest = steps[-1]
-        # 数字目录必须由Orbax提交完成，辅助复核状态及W&B身份也必须配套。
-        if not (checkpoint / str(latest) / "_CHECKPOINT_METADATA").is_file():
-            raise ValueError("最新checkpoint缺少Orbax提交元数据，不能续训")
+        info = checkpoint_info(checkpoint)
+        latest = info["step"]
+        if for_inference:
+            return config, latest, str(checkpoint)
+        # 续训还要求辅助状态和W&B身份；只推理不恢复经验池。
         state = json.loads((checkpoint / f"review_state_{latest}.json").read_text())
         if any(type(state.get(k)) is not int or state[k] < 0 for k in ("credit", "update_count")):
             raise ValueError("复核训练状态无效")
@@ -105,7 +103,7 @@ class ServiceManager:
         for path in self.runtime.glob("*/process.json"):
             try:
                 value = json.loads(path.read_text())
-                if not value.get("mock"):
+                if not value.get("mock") and value.get("mode", "train") != "eval":
                     records.append(value)
             except (OSError, ValueError):
                 continue
@@ -114,12 +112,18 @@ class ServiceManager:
                 continue
             seen.add(record["run_name"])
             item = {"id": record["id"], "run_name": record["run_name"],
-                    "started_at": record.get("started_at"), "resumable": False}
+                    "started_at": record.get("started_at"), "resumable": False, "inferable": False}
+            try:
+                config, step, checkpoint = self.resume_info(record["id"], for_inference=True)
+                item.update(inferable=True, step=step, checkpoint_dir=str(checkpoint),
+                            max_steps=config["max_steps"], model_kind="rl")
+            except (OSError, ValueError, KeyError) as error:
+                item["reason"] = str(error)
             try:
                 config, step, checkpoint = self.resume_info(record["id"])
                 item.update(resumable=True, step=step, update_count=json.loads(
                     (Path(checkpoint) / f"review_state_{step}.json").read_text())["update_count"],
-                    max_steps=config["max_steps"])
+                    max_steps=config["max_steps"], checkpoint_dir=str(checkpoint), model_kind="rl")
             except (OSError, ValueError, KeyError) as error:
                 item["reason"] = str(error)
             result.append(item)
@@ -159,8 +163,15 @@ class ServiceManager:
                 "training": progress, "runs": self.runs(), "total_steps": self._budget(record),
                 "completed_steps": progress.get("env_step", record.get("resume_step") or 0)}
 
-    def start(self, config_path, *, mock=False, resume_run=None, additional_steps=None, total_steps=None):
+    def start(self, config_path, *, mock=False, resume_run=None, additional_steps=None, total_steps=None,
+              mode="train", model_folder=None):
         with self.lock():
+            if mode not in {"train", "eval"}:
+                raise ValueError("运行方式只支持继续训练或只推理")
+            if model_folder and (mode != "eval" or resume_run):
+                raise ValueError("命名模型目录仅用于只推理，且不能同时选择续训实验")
+            if mode == "eval" and (not (resume_run or model_folder) or additional_steps is not None or mock):
+                raise ValueError("只推理需要选择已有完整模型，不接受追加训练步数或模拟服务")
             if total_steps is not None and (type(total_steps) is not int or not 1 <= total_steps <= 10_000_000):
                 raise ValueError("训练总步数必须为1到10000000整数")
             if total_steps is not None and additional_steps is not None:
@@ -173,7 +184,9 @@ class ServiceManager:
                 raise ValueError("模拟服务不支持模型续训")
             current = self.status()
             if current["running"]:
-                if resume_run is not None or additional_steps is not None:
+                if current.get("mode", "train") != mode:
+                    raise RuntimeError("已有其他运行方式的会话，请先结束")
+                if resume_run is not None or model_folder is not None or additional_steps is not None:
                     raise RuntimeError("请先停止当前训练，再选择续训实验")
                 if total_steps is not None and total_steps != current.get("total_steps"):
                     raise RuntimeError("现有训练总预算不同，请先停止再修改")
@@ -183,7 +196,21 @@ class ServiceManager:
             source = resolve_path(config_path)
             config = load_config(str(source))
             resume_step = None
-            if resume_run is not None:
+            evaluation_source = None
+            if mode == "eval":
+                if model_folder:
+                    model = verify_model(model_folder)
+                    if model["kind"] != "rl":
+                        raise ValueError("只推理需要完整RL策略；RTC-SFT基线仅用于初始化")
+                    config = load_config(str(Path(model_folder).resolve() / "inference.yaml"))
+                    model_step = model["step"]
+                    model_dir = str(Path(model_folder).resolve() / "checkpoints")
+                else:
+                    config, model_step, model_dir = self.resume_info(resume_run, for_inference=True)
+                config = inference_config(config, model_dir, model_step, max_steps=total_steps)
+                evaluation_source = {"run_id": resume_run, "model_folder": model_folder,
+                                     "checkpoint_dir": model_dir, "step": model_step}
+            elif resume_run is not None:
                 config, resume_step, _ = self.resume_info(resume_run)
                 if additional_steps is not None:
                     # 只扩展采集预算；模型、数据、资产、run_name沿用原实验快照。
@@ -211,14 +238,17 @@ class ServiceManager:
             folder = self.runtime / job_id
             folder.mkdir()
             # 每次启动保留独立管理日志；续训复用原训练目录，不新建模型实验。
-            if resume_run is None:
+            if resume_run is None or mode == "eval":
                 config["run_name"] = f"{config['run_name']}_{time.strftime('%Y%m%d_%H%M%S')}_{job_id[:6]}"
+            if mode == "eval":
+                config["evaluation_session_id"] = job_id
             snapshot = folder / "experiment.yaml"
             snapshot.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
             record = {"id": job_id, "run_name": config["run_name"], "port": config["port"],
                       "config": str(snapshot), "source_config": str(source), "mock": mock,
                       "log": str(folder / "server.log"), "started_at": time.time(),
-                      "resume_run": resume_run, "resume_step": resume_step, "total_steps": config.get("max_steps")}
+                      "resume_run": resume_run if mode == "train" else None, "resume_step": resume_step,
+                      "mode": mode, "evaluation_source": evaluation_source, "total_steps": config.get("max_steps")}
             write_json(folder / "process.json", record)
             # 管理器是独立进程组的组长；即使SSH断开，也能继续记录退出码并管理整棵进程树。
             with Path(record["log"]).open("ab") as output:
@@ -293,6 +323,8 @@ def main():
     parser.add_argument("--resume-run")
     parser.add_argument("--additional-steps", type=int)
     parser.add_argument("--total-steps", type=int)
+    parser.add_argument("--mode", choices=("train", "eval"), default="train")
+    parser.add_argument("--model-folder", help="只推理时使用已登记的固定RL版本；不从HTTP接受任意目录")
     parser.add_argument("--mock", action="store_true", help="仅命令行管理链路验收；不训练、不连接机器人")
     args = parser.parse_args()
     manager = ServiceManager()
@@ -301,7 +333,8 @@ def main():
         return
     try:
         result = manager.start(args.config, mock=args.mock, resume_run=args.resume_run,
-                               additional_steps=args.additional_steps, total_steps=args.total_steps) if args.action == "start" else (
+                               additional_steps=args.additional_steps, total_steps=args.total_steps,
+                               mode=args.mode, model_folder=args.model_folder) if args.action == "start" else (
             manager.stop() if args.action == "stop" else manager.status())
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:

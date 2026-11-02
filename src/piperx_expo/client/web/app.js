@@ -61,6 +61,7 @@ const statusNames = {
   recording: "采集中",
   review_pending: "待复核",
   submitted: "已提交 · 待确认",
+  evaluated: "推理结果已记录 · 未用于训练",
   queued: "已归档 · 等待整批训练",
   accepted: "已加入经验",
   rejected: "已拒收",
@@ -144,19 +145,33 @@ document.addEventListener("keydown", (event) => {
   }
 });
 function trainingOptions() {
-  const values = {total_steps: Number($("resume-budget").value)};
+  const values = {total_steps: Number($("resume-budget").value), mode: $("session-mode").value};
   if ($("server-training").value) values.resume_run = $("server-training").value;
   return values;
 }
-$("prepare").onclick = () => command("prepare", trainingOptions());
+$("prepare").onclick = () => {
+  const values = trainingOptions();
+  if (values.mode === "eval" && !values.resume_run) {
+    notice("只推理需要先选择一个完整保存的模型。", true);
+    return;
+  }
+  command("prepare", values);
+};
 $("finish-training").onclick = () => command("finish_training");
 $("connect-advanced").onclick = () => command("start", {motion_confirmed: $("motion-confirm").checked});
 $("server-start").onclick = () => command("server_start", trainingOptions());
 $("server-training").onchange = () => {
   const run = current?.remote_server?.runs?.find(run => run.id === $("server-training").value);
-  $("resume-budget").min = run ? run.step + 1 : 1;
-  if (run?.max_steps) $("resume-budget").value = Math.max(run.max_steps, run.step + 1);
-  $("prepare").textContent = run ? "准备继续所选训练" : "准备训练";
+  const evaluation = $("session-mode").value === "eval";
+  $("resume-budget").min = !evaluation && run ? run.step + 1 : 1;
+  if (!evaluation && run?.max_steps) $("resume-budget").value = Math.max(run.max_steps, run.step + 1);
+  $("budget-caption").textContent = evaluation ? "本轮推理最大动作步数" : "训练总步数";
+  $("prepare").textContent = evaluation ? "准备所选模型推理" : run ? "准备继续所选训练" : "准备训练";
+};
+$("session-mode").onchange = () => {
+  if ($("session-mode").value === "eval") $("resume-budget").value = current?.settings?.episode_steps || 200;
+  if (current) render(current);
+  $("server-training").onchange();
 };
 $("server-stop").onclick = () => command("server_stop");
 for (const [id, action] of [["recover-enable", "recover_enable"], ["hold-position", "hold_position"], ["home-arm", "home_arm"], ["cancel-hold", "cancel_hold"]]) {
@@ -310,6 +325,7 @@ function render(s) {
   const ep = s.episode,
     phase = s.phase;
   const remote = s.remote_server || { enabled: false };
+  const evaluation = s.session_mode === "eval" || (remote.running && remote.mode === "eval");
   const hold = s.arm_hold || {};
   const armBusy = hold.running && !["enable_sent", "enabled", "holding", "homed"].includes(hold.phase);
   for (const id of ["recover-enable", "hold-position", "home-arm"]) {
@@ -333,22 +349,25 @@ function render(s) {
       warmup_boot: "预热首次推理 · 不运动", warmup_rtc: "预热RTC重规划 · 不运动",
       warmup_measure: "测量稳定推理延迟 · 不运动", ready: "预热完成",
       awaiting_reset: "等待现场归位确认", collecting: "正在采集", review_pending: "等待回合复核",
-      episode_queued: "本条已归档，等待下一条", processing_batch: "整轮采完，正在整理入池",
+      evaluation_recorded: "推理结果已记录，等待下一条", episode_queued: "本条已归档，等待下一条", processing_batch: "整轮采完，正在整理入池",
       training_skipped: "未满足更新门槛，准备保存", episode_committed: "本条处理完成", updating: "正在更新模型", saving: "正在保存checkpoint", saved: "保存完成", completed: "训练完成",
     };
     $("server-phase").textContent = remote.busy ? "正在处理操作"
       : (remote.running && stages[training.stage]) || names[remote.phase] || remote.phase;
     const selector = $("server-training");
-    const signature = JSON.stringify(remote.runs || []);
+    if (remote.running) $("session-mode").value = remote.mode || "train";
+    $("session-mode").disabled = remote.busy || remote.running || !s.can_start;
+    const selectingEval = $("session-mode").value === "eval";
+    const signature = JSON.stringify([selectingEval, remote.runs || []]);
     if (selector.dataset.runs !== signature) {
       const previous = selector.value;
-      selector.replaceChildren(new Option("新建训练", ""));
+      selector.replaceChildren(new Option(selectingEval ? "请选择已保存模型" : "新建训练", ""));
       for (const run of remote.runs || []) {
-        const label = run.resumable
-          ? `${run.run_name} · 第${run.step}步 / 更新${run.update_count}次`
+        const label = run.resumable || (selectingEval && run.inferable)
+          ? `${run.run_name} · 第${run.step}步 / 更新${run.update_count ?? "未记录"}次`
           : `${run.run_name} · ${run.reason || "不可续训"}`;
         const option = new Option(label, run.id);
-        option.disabled = !run.resumable;
+        option.disabled = selectingEval ? !(run.inferable ?? run.resumable) : !run.resumable;
         selector.add(option);
       }
       if ([...selector.options].some(o => o.value === previous && !o.disabled)) selector.value = previous;
@@ -363,22 +382,27 @@ function render(s) {
     $("connect-advanced").disabled = !s.can_start || !remote.running || remote.stopping || training.stage === "completed";
     $("finish-training").disabled = s.demo || s.finish_requested ||
       !["homing", "running", "archiving", "review_pending", "submitted", "waiting_server", "awaiting_reset", "finishing"].includes(phase);
-    $("finish-training").textContent = s.finish_requested ? "已申请结束采集并训练" : "结束采集并训练";
+    $("finish-training").textContent = evaluation ? (s.finish_requested ? "已申请结束推理" : "结束推理") : s.finish_requested ? "已申请结束采集并训练" : "结束采集并训练";
     const overall = s.training_progress || {};
     const completed = overall.completed_steps ?? remote.completed_steps ?? 0;
     const total = overall.total_steps ?? remote.total_steps;
-    const saved = overall.checkpoint_step ?? training.checkpoint_step ?? remote.resume_step;
+    const saved = overall.checkpoint_step ?? training.checkpoint_step ?? remote.evaluation_source?.step ?? remote.resume_step;
     $("training-completed").textContent = completed;
     $("training-total").textContent = total ?? "—";
     $("training-saved").textContent = saved == null ? "尚无保存点" : `第${saved}步`;
     $("training-progress").max = total || 1;
     $("training-progress").value = completed;
-    $("resume-hint").textContent = selector.value
+    const chosen = remote.runs?.find(run => run.id === selector.value);
+    $("resume-hint").textContent = selectingEval
+      ? (chosen ? `固定读取第${chosen.step}步完整模型，不更新、不覆盖权重。来源：${chosen.checkpoint_dir || chosen.run_name}` : "请选择已有模型；推理步数从0重新计，不要求大于模型保存步数。")
+      : selector.value
       ? "从所选保存步数接续。填写训练总步数，必须大于保存步数；准备完成后仍由你确认开始。"
       : "可从列表选择历史实验。未保存模型checkpoint的实验不能恢复；停止不会额外强制保存。";
     $("server-start").disabled = remote.busy || remote.running;
     $("server-stop").disabled = remote.phase === "idle" && !remote.busy;
-    $("server-hint").textContent = remote.error || training.error || (remote.mock
+    $("server-hint").textContent = remote.error || training.error || (remote.mode === "eval"
+      ? "只推理模式：完整模型只读恢复，结果另存评估目录，每条仍需人工确认归位、张开夹爪。"
+      : remote.mock
       ? "当前为管理链路模拟服务，不加载模型、不训练。"
       : "点击准备训练后自动启动、连接并预热。准备完成后等待你确认归位并开始，不会自动运动。");
     const counters = [];
@@ -387,7 +411,8 @@ function render(s) {
     if (training.pending_episodes !== undefined) counters.push(`本轮归档${training.pending_episodes}条`);
     if (training.planned_updates !== undefined) counters.push(`本轮更新${training.completed_updates || 0}/${training.planned_updates}次`);
     if (training.update_count !== undefined) counters.push(`累计更新${training.update_count}次`);
-    if (training.checkpoint_step != null) counters.push(`已保存第${training.checkpoint_step}步`);
+    if (training.checkpoint_step != null) counters.push(`${evaluation ? "读取模型" : "已保存"}第${training.checkpoint_step}步`);
+    if (training.evaluation_episodes !== undefined) counters.push(`已评估${training.evaluation_episodes}条`);
     $("server-run").textContent = (remote.run_name || "选择新建训练或继续已有实验") +
       (counters.length ? " · " + counters.join(" / ") : "");
     const log = remote.log_tail || "暂无日志";
@@ -414,6 +439,8 @@ function render(s) {
     Math.min(100, ((ep?.steps || 0) / Number($("budget").textContent)) * 100) +
     "%";
   $("review-fields").disabled = phase !== "review_pending" || !!selected;
+  $("admitted").disabled = evaluation;
+  if (evaluation) $("admitted").checked = false;
   $("review-badge").textContent = ep
     ? statusNames[ep.status] || ep.status
     : "等待轨迹";
@@ -460,7 +487,7 @@ function render(s) {
   if (ep && ep.id !== lastEpisode) {
     lastEpisode = ep.id;
     document.querySelector('input[name="manual"][value="auto"]').checked = true;
-    $("admitted").checked = true;
+    $("admitted").checked = !evaluation;
     $("note").value = "";
     selected = null;
   }
@@ -494,6 +521,8 @@ function render(s) {
     auto === true ? "✓" : auto === false ? "—" : "◎";
   $("ack-hint").textContent = selected
     ? "正在回放历史档案；返回实时后可复核当前轨迹。"
+    : ep?.status === "evaluated"
+      ? "推理结果已记录，没有进入训练经验池或更新模型。"
     : ep?.status === "queued"
       ? "原始轨迹已归档；整轮采集结束后统一入池和训练。"
     : ep?.status === "accepted"
@@ -535,9 +564,15 @@ function render(s) {
       "训练已正常结束；查看累计步数与最近保存点，可选择历史实验续训。",
     ],
   };
+  if (evaluation) {
+    prompts.waiting_server = ["推理结果已记录", "本模式不训练、不保存新权重；继续下一条仍由你确认开始。"];
+    prompts.completed = ["本轮推理已结束", "原模型未修改；结果保存在独立评估目录。"];
+  }
   const prompt = prompts[phase] || ["", ""];
   $("action-title").textContent = prompt[0];
-  $("action-hint").textContent = s.finish_requested && phase !== "completed"
+  $("action-hint").textContent = evaluation && s.finish_requested && phase !== "completed"
+    ? "已申请结束推理；完成本条复核和结果记录后退出，不更新或保存新模型。"
+    : s.finish_requested && phase !== "completed"
     ? (phase === "review_pending" ? "已申请结束采集。请先完成本条审核；提交后统一处理整批、训练并保存。"
       : "已申请结束采集：本条完成并审核后，整批训练并保存，不启动下一条。") : prompt[1];
   const workflow = ["homing", "running", "archiving"].includes(phase) ? "collect"

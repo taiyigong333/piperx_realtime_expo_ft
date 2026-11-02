@@ -37,8 +37,10 @@ class RemoteServer:
         if action not in {"start", "stop", "status"}:
             raise ValueError("未知服务器操作")
         if values:
-            if action != "start" or set(values) - {"resume_run", "additional_steps", "total_steps"}:
+            if action != "start" or set(values) - {"resume_run", "additional_steps", "total_steps", "mode"}:
                 raise ValueError("不允许覆盖服务器启动参数")
+            if values.get("mode", "train") not in {"train", "eval"}:
+                raise ValueError("运行方式必须为train或eval")
             if "resume_run" in values and not re.fullmatch(r"[0-9a-f]{32}", str(values["resume_run"])):
                 raise ValueError("续训实验ID无效")
             if "additional_steps" in values and (
@@ -71,6 +73,8 @@ class RemoteServer:
                 command += f" --additional-steps {int(values['additional_steps'])}"
             if "total_steps" in values:
                 command += f" --total-steps {int(values['total_steps'])}"
+            if "mode" in values:
+                command += f" --mode {shlex.quote(values['mode'])}"
         result = subprocess.run(
             ["ssh", "-oBatchMode=yes", "-oConnectTimeout=5", "-oServerAliveInterval=5",
              "-oServerAliveCountMax=2", self.config["ssh_host"], command],

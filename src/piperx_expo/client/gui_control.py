@@ -55,6 +55,7 @@ class GUIController:
         self.end_requested = False
         self.demo = False
         self.batch_training = False
+        self.session_mode = "train"
         self.batch_pending_ids = set()
         self.last_heartbeat = time.monotonic()
         self.remote_server = RemoteServer(self.config["remote_server"]) if self.config.get("remote_server") else None
@@ -153,6 +154,7 @@ class GUIController:
                 "training_progress": copy.deepcopy(self.training_progress),
                 "finish_requested": self.finish_requested,
                 "batch_training": self.batch_training,
+                "session_mode": self.session_mode,
                 "camera_ready": camera_ok,
                 "stop_status": getattr(self.env.device, "stop_result", "") if self.env else "",
                 "camera_error": self.camera_error,
@@ -213,8 +215,12 @@ class GUIController:
         """合并启动和连接；只准备模型，归位/策略仍等待单独的ready。"""
         if not self.remote_server:
             raise ValueError("此配置未启用远程训练；模拟体验或高级连接入口仍可使用")
-        if set(values) - {"resume_run", "total_steps"}:
+        if set(values) - {"resume_run", "total_steps", "mode"}:
             raise ValueError("准备训练仅接受历史实验和训练总步数")
+        if values.get("mode", "train") not in {"train", "eval"}:
+            raise ValueError("运行方式必须为继续训练或只推理")
+        if values.get("mode") == "eval" and not values.get("resume_run"):
+            raise ValueError("只推理需要先选择已有完整模型")
         if "total_steps" in values and (type(values["total_steps"]) is not int
                                         or not 1 <= values["total_steps"] <= 10_000_000):
             raise ValueError("训练总步数必须为1到10000000整数")
@@ -226,10 +232,14 @@ class GUIController:
             if remote.get("stopping") or remote.get("phase") == "stopping":
                 raise ValueError("上一训练仍在停止，请等待退出后再准备")
             if remote.get("running"):
+                if remote.get("mode", "train") != values.get("mode", "train"):
+                    raise ValueError("已有不同运行方式的会话，请先结束")
                 if remote.get("training", {}).get("stage") == "completed":
                     raise ValueError("上一训练正在收尾，请等待退出")
-                if values.get("resume_run"):
+                if values.get("resume_run") and values.get("mode", "train") != "eval":
                     raise ValueError("已有训练运行；连接当前实验前请清空历史实验选择")
+                if values.get("mode") == "eval" and values.get("resume_run") != remote.get("evaluation_source", {}).get("run_id"):
+                    raise ValueError("已有推理会话加载了另一模型，请先结束")
                 if values.get("total_steps") not in (None, remote.get("total_steps")):
                     raise ValueError("已有训练总预算不同，请先结束当前实验再修改")
             else:
@@ -298,6 +308,7 @@ class GUIController:
                 self.policy_status = {}
                 self.decision = None
                 self.batch_training = False
+                self.session_mode = "train"
                 self.batch_pending_ids.clear()
                 self.last_heartbeat = time.monotonic()
                 self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
@@ -429,9 +440,13 @@ class GUIController:
             if self.recorder is not None or self.phase not in {"connecting", "warming"}:
                 raise RuntimeError("只能在初始归位前预热模型")
             self.phase = "warming"
+            self.session_mode = request.get("session_mode", "train")
+            if self.session_mode not in {"train", "eval"}:
+                raise ValueError("未知会话方式")
             self.batch_training = request.get("batch_training") is True
+            self.env.config["session_mode"] = self.session_mode
             response.update(observation=self.env.get_observation(), watchdog_s=self.config["watchdog_s"],
-                            batch_training=self.batch_training)
+                            batch_training=self.batch_training, session_mode=self.session_mode)
         elif operation == "policy_status":
             if self.phase != "warming":
                 raise RuntimeError("当前未进行模型预热")
@@ -444,6 +459,7 @@ class GUIController:
                 "rejected",
                 "demo_reviewed",
                 "queued",
+                "evaluated",
             }:
                 raise RuntimeError("上条轨迹尚未收到服务器确认，禁止启动下一条")
             try:
@@ -512,6 +528,9 @@ class GUIController:
                 raise ValueError("回合累计步数/总预算无效")
             self.episode_start_step = start
             self.training_progress.update(completed_steps=start, total_steps=total)
+            if self.session_mode == "eval":
+                self.training_progress.update(checkpoint_step=request.get("checkpoint_step"), session_mode="eval",
+                                              update_count=0)
         elif operation in {"training_control", "episode_complete"}:
             if self.recorder and self.recorder.meta["status"] not in {"accepted", "rejected"}:
                 raise RuntimeError("先完成本条审核和准入确认，再更新/保存")
@@ -522,10 +541,10 @@ class GUIController:
         elif operation == "session_complete":
             if self.batch_pending_ids:
                 raise RuntimeError("仍有未处理的整批轨迹，不能报告会话完成")
-            if self.recorder and self.recorder.meta["status"] not in {"accepted", "rejected"}:
+            if self.recorder and self.recorder.meta["status"] not in {"accepted", "rejected", "evaluated"}:
                 raise RuntimeError("仍有未确认回合，不能报告会话完成")
             final_progress = request.get("progress", {})
-            if self.finish_requested and (final_progress.get("checkpoint_step") is None
+            if self.session_mode != "eval" and self.finish_requested and (final_progress.get("checkpoint_step") is None
                     or final_progress.get("checkpoint_step") != final_progress.get("completed_steps")):
                 raise RuntimeError("尚未确认本条checkpoint完整保存，不能报告正常收尾")
             self.training_progress.update(final_progress)
@@ -535,12 +554,19 @@ class GUIController:
             if self.phase != "submitted" or request.get("episode_id") != self.recorder.id:
                 raise RuntimeError("服务器确认与当前轨迹不匹配")
             expected = ("queued" if self.batch_training else "accepted") if self.decision["admitted"] else "rejected"
+            if self.session_mode == "eval":
+                expected = "evaluated"
             if request.get("outcome") != expected:
                 raise RuntimeError("服务器准入结果与人工复核不一致")
             self.recorder.update(status=expected, server_ack=request.get("details", {}))
             if expected == "queued":
                 self.batch_pending_ids.add(self.recorder.id)
             self.phase = "waiting_server"
+        elif operation == "evaluation_complete":
+            if self.session_mode != "eval" or self.recorder.meta["status"] != "evaluated":
+                raise RuntimeError("当前不是已记录的推理回合")
+            self.training_progress.update(request.get("progress", {}))
+            response["stop_after_episode"] = self.finish_requested
         elif operation == "batch_status":
             if not self.batch_training or (self.recorder and self.recorder.meta["status"] not in {
                     "queued", "accepted", "rejected"}):
@@ -580,6 +606,8 @@ class GUIController:
             if not isinstance(note, str) or len(note) > 2000:
                 raise ValueError("备注最多2000字")
             labels = resolve_review(self.recorder.meta["auto_success"], manual_success, admitted)
+            if self.session_mode == "eval":
+                labels = resolve_review(self.recorder.meta["auto_success"], manual_success, False)
             self.decision = {
                 **labels,
                 "episode_id": self.recorder.id,
@@ -597,7 +625,7 @@ class GUIController:
         elif action in {"server_start", "server_stop", "server_status"}:
             if not self.remote_server:
                 raise ValueError("此配置未启用远程服务器管理")
-            if values and (action != "server_start" or set(values) - {"resume_run", "additional_steps", "total_steps"}):
+            if values and (action != "server_start" or set(values) - {"resume_run", "additional_steps", "total_steps", "mode"}):
                 raise ValueError("服务器管理不接受覆盖SSH或启动命令")
             if action == "server_stop":
                 self.stop()  # 先停止本地运动，再发远程停止请求。

@@ -7,12 +7,24 @@ import math
 import os
 import runpy
 import sys
+import uuid
 from datetime import datetime
 
 from piperx_expo.config import ROOT, load_config, resolve_path
 
 
 def validate(config, stage):
+    inference_only = config.get("inference_only") is True
+    if inference_only:
+        from piperx_expo.server.model_store import checkpoint_info
+
+        if stage != "rl" or not config.get("episode_review"):
+            raise ValueError("只推理配置使用GUI复核驱动：scripts/server.sh rl --config ...")
+        info = checkpoint_info(config["inference_checkpoint_dir"], config["inference_checkpoint_step"])
+        destination = resolve_path(config["output_dir"]) / f"{config['run_name']}_eval"
+        source = resolve_path(info["checkpoint_dir"])
+        if destination == source.parent or destination.is_relative_to(source):
+            raise ValueError("只推理结果必须另存，不能写入来源模型目录")
     if config.get("episode_review"):
         warmup_samples = config.get("policy_warmup_samples", 3)
         if type(warmup_samples) is not int or not 1 <= warmup_samples <= 100:
@@ -32,7 +44,7 @@ def validate(config, stage):
     if not 0 <= config["delay"] <= config["replan_steps"]:
         raise ValueError("delay 必须在 [0,replan_steps] 内")
     if batch_size < 1 or config["max_steps"] < 1 or (
-        stage != "sft" and config["max_steps"] < batch_size
+        stage != "sft" and not inference_only and config["max_steps"] < batch_size
     ):
         raise ValueError("max_steps/batch_size 不合法")
     dataset = resolve_path(config["dataset_path"])
@@ -91,7 +103,7 @@ def build_args(config, stage):
                 f"--batch_size={batch_size}",
                 f"--max_steps={config['max_steps']}",
                 "--project_name=piperx_realtime_expo_ft",
-                f"--run_name={config['run_name']}_{stage}",
+                f"--run_name={config['run_name']}_{'eval' if config.get('inference_only') else stage}",
                 f"--output_dir={resolve_path(config['output_dir'])}",
                 f"--checkpoint_interval={config['checkpoint_interval']}",
                 f"--checkpoint_model={config.get('checkpoint_model', True)}",
@@ -121,7 +133,8 @@ def _install_local_log(config, stage):
     import numpy as np
     import wandb
 
-    path = resolve_path(config["output_dir"]) / f"{config['run_name']}_{stage}" / "metrics.jsonl"
+    suffix = "eval" if config.get("inference_only") else stage
+    path = resolve_path(config["output_dir"]) / f"{config['run_name']}_{suffix}" / "metrics.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     original = None
     original_init = wandb.init
@@ -265,6 +278,11 @@ def main():
                         help="仅GUI-RL：使用离线观测加载完整策略并预热/测时，不连接机器人、不更新模型")
     args, extra = parser.parse_known_args()
     config = load_config(args.config)
+    if config.get("inference_only") and not config.get("evaluation_session_id"):
+        # 命名模型可重复调用，但每次评估日志必须分开；模型路径/步数保持固定。
+        config["run_name"] += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    if args.resume and config.get("inference_only"):
+        raise ValueError("只推理从固定保存点读取，不使用--resume继续写入训练")
     if args.policy_preflight and (args.stage != "rl" or not config.get("episode_review")):
         raise ValueError("policy-preflight只支持GUI-RL配置")
     entry = {"sft": "train_offline_rtc.py", "rl": "train_pi_robo.py", "eval": "eval_droid_policy.py"}[

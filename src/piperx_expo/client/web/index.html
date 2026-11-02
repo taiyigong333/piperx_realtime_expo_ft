@@ -63,9 +63,11 @@
               </div>
             </div>
             <div class="server-training-options">
-              <label for="server-training">训练方式</label>
+              <label for="session-mode">使用方式</label>
+              <select id="session-mode"><option value="train">采集并训练 / 继续训练</option><option value="eval">使用已保存模型 · 只推理不训练</option></select>
+              <label for="server-training">模型 / 实验</label>
               <select id="server-training"><option value="">新建训练</option></select>
-              <label id="resume-budget-label">训练总步数
+              <label id="resume-budget-label"><span id="budget-caption">训练总步数</span>
                 <input id="resume-budget" type="number" min="1" max="10000000" placeholder="读取配置中" />
               </label>
               <p id="resume-hint"></p>

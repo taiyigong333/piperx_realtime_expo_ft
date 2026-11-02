@@ -13,6 +13,7 @@ import numpy as np
 from piperx_expo.client.recording import write_json
 from piperx_expo.review import EpisodeDigest, commit_episode, resolve_review
 from piperx_expo.server.session_control import reset_reviewed_episode
+from piperx_expo.server.session_control import StopAfterEpisode
 
 
 def collect_episode(env, sampler, agent, replan_steps, control_hz, remaining_steps, *, on_stage=None):
@@ -121,6 +122,46 @@ def update_credit(credit, accepted_episodes, admitted_steps, end_step, batch_siz
     if accepted_episodes < 10 or end_step < batch_size:
         return 0, credit
     return divmod(credit + admitted_steps, step_interval)
+
+
+def evaluate_session(env, sampler, agent, *, replan_steps, control_hz, max_steps,
+                     output_dir, checkpoint_step, on_stage=None):
+    """只推理的GUI回合循环；没有processor/update/save接口，结果写入独立评估目录。"""
+    on_stage = on_stage or (lambda *_a, **_k: None)
+    step, episodes = 0, 0
+    while step < max_steps:
+        env.client._call_operation("episode_context", {
+            "env_id": env.env_id, "start_step": step, "total_steps": max_steps,
+            "checkpoint_step": checkpoint_step,
+        })
+        try:
+            result, agent = collect_episode(env, sampler, agent, replan_steps, control_hz,
+                                            max_steps - step, on_stage=on_stage)
+        except StopAfterEpisode:
+            break
+        start = step
+        step += len(result["transitions"])
+        review = {**result["review"], "admitted": False, "evaluation_only": True,
+                  "checkpoint_step": checkpoint_step}
+        # 评估图像/轨迹已在客户端归档，服务器只写审核结果，绝不触碰训练经验目录。
+        persist_reviewed(output_dir, [], review, start, step)
+        episodes += 1
+        env.client._call_operation("episode_ack", {
+            "env_id": env.env_id, "episode_id": review["episode_id"], "outcome": "evaluated",
+        })
+        details = {"completed_steps": step, "total_steps": max_steps, "checkpoint_step": checkpoint_step,
+                   "update_count": 0, "evaluation_episodes": episodes, "session_mode": "eval"}
+        reply = env.client._call_operation("evaluation_complete", {"env_id": env.env_id, "progress": details})
+        on_stage("evaluation_recorded", env_step=step, evaluation_episodes=episodes, update_count=0)
+        if reply.get("stop_after_episode"):
+            break
+    env.client._call_operation("session_complete", {"env_id": env.env_id, "progress": {
+        "completed_steps": step, "total_steps": max_steps, "checkpoint_step": checkpoint_step,
+        "update_count": 0, "evaluation_episodes": episodes, "session_mode": "eval",
+    }})
+    on_stage("completed", env_step=step, evaluation_episodes=episodes, update_count=0,
+             checkpoint_step=checkpoint_step, total_steps=max_steps)
+    return agent
 
 
 def restore_reviewed(processor, checkpoint_dir, up_to_step):

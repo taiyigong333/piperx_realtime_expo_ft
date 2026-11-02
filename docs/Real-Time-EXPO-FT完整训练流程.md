@@ -361,3 +361,7 @@ bash scripts/server.sh eval --config configs/server/rotating_square.h30.yaml \
 - [官方动态抓取配置](https://github.com/pd-perry/expo-ft/blob/21fe3d3b7d913c80836496817965932f49e0aedf/configs/task/dynamic_pick.py)。
 
 论文动态抓取写连续5步，所核验的仓库配置采用6步。本次复用6步及任务规则，实际米制阈值来自Piper-X现场正样本，不复用DROID的夹爪数值。
+
+## 保存模型后的日常使用
+
+GUI模型使用已补充继续训练与只推理入口。原CLI eval保持原客户端协议；GUI只推理使用独立复核驱动，先预热、每条人工确认归位张开、只读恢复完整RL模型，结果另存。权重分区、固定命名版本、实际419步模型示例和保留依赖见[模型权重管理与使用](模型权重管理与使用.md)。不要用仅VLA参数替代完整RL恢复，也不要将SFT更新步与RL累计动作步混淆。
