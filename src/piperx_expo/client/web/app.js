@@ -1,4 +1,33 @@
 "use strict";
+
+// 预览只追赶最新帧；上一张未完成时不覆盖src，避免取消慢请求或积压画面。
+class LatestFramePreview {
+  constructor(images, load) {
+    this.images = images;
+    this.load = load;
+    this.pending = new Set();
+    for (const img of images) {
+      const finished = () => this.pending.delete(img);
+      img.addEventListener("load", finished);
+      img.addEventListener("error", finished);
+    }
+  }
+
+  refresh(active) {
+    if (!active) return;
+    this.images.forEach((img, camera) => {
+      if (this.pending.has(img)) return;
+      this.pending.add(img);
+      try {
+        this.load(img, camera);
+      } catch (error) {
+        this.pending.delete(img);
+        throw error;
+      }
+    });
+  }
+}
+
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="expo-token"]').content;
 let current = null,
@@ -148,6 +177,18 @@ function loadImage(img, url) {
   };
   img.src = url;
 }
+const configuredPreviewHz = Number(document.querySelector('meta[name="expo-preview-hz"]')?.content);
+const previewHz = configuredPreviewHz > 0 && configuredPreviewHz <= 30 ? configuredPreviewHz : 20;
+const livePreview = new LatestFramePreview(
+  [$("camera-0"), $("camera-1")],
+  (img, camera) => loadImage(img, `/api/frame?camera=${camera}&t=${Date.now()}`),
+);
+function refreshLivePreview() {
+  livePreview.refresh(
+    !document.hidden && !$("view-run").hidden && !selected &&
+    !!(current?.camera_ready || current?.state),
+  );
+}
 function images() {
   if (selected) {
     for (let c = 0; c < 2; c++)
@@ -155,9 +196,8 @@ function images() {
         $("camera-" + c),
         `/api/episode/${selected.id}/frame?camera=${c}&index=${replayFrame}`,
       );
-  } else if (current?.camera_ready || current?.state) {
-    for (let c = 0; c < 2; c++)
-      loadImage($("camera-" + c), `/api/frame?camera=${c}&t=${Date.now()}`);
+  } else {
+    refreshLivePreview();
   }
 }
 $("scrubber").oninput = () => {
@@ -541,7 +581,6 @@ async function poll() {
   polling = true;
   try {
     render(await api("/api/state"));
-    if (!selected) images();
   } catch (error) {
     notice("无法连接本地客户端：" + error.message, true);
   } finally {
@@ -550,5 +589,7 @@ async function poll() {
 }
 poll();
 refreshHistory();
+// 状态/心跳维持原节拍；双路视频独立刷新，不被状态响应或曲线绘制串行限速。
+setInterval(refreshLivePreview, 1000 / previewHz);
 setInterval(poll, 600);
 setInterval(refreshHistory, 3000);
