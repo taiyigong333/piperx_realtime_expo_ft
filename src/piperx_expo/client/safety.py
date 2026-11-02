@@ -29,6 +29,9 @@ def validate_client_config(config: dict):
         for key in ("feedback_timeout_s", "camera_timeout_s", "gripper_force_n"):
             if not np.isfinite(config[key]) or config[key] <= 0:
                 raise ValueError(f"{key} 必须是有限正数")
+        startup = config.get("feedback_start_timeout_s", 2)
+        if not np.isfinite(startup) or startup <= 0:
+            raise ValueError("feedback_start_timeout_s 必须是有限正数")
         if not 0 < config["speed_percent"] <= 100:
             raise ValueError("speed_percent 必须在 (0,100] 内")
 

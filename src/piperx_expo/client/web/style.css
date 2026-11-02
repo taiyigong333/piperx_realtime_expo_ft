@@ -1083,3 +1083,10 @@ footer > span:first-child {
 /* 三个独立机械臂操作在窄屏换行，状态提示不挤压按钮。 */
 .session-actions .action-buttons { flex-wrap: wrap; justify-content: flex-end; }
 #hold-status { flex: 0 0 100%; text-align: right; }
+
+/* 训练选择在小屏上自然换行，避免长实验名挤掉停止按钮。 */
+.server-training-options { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
+.server-training-options select { max-width: 100%; min-width: 180px; flex: 1; }
+.server-training-options input { width: 110px; }
+.server-training-options p { flex-basis: 100%; margin: 0; }
+.server-training-options [hidden] { display: none; }

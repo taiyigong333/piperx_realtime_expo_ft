@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -71,10 +72,63 @@ class ServiceManager:
         path = self.runtime / job_id / "process.json"
         return path, json.loads(path.read_text())
 
+    def resume_info(self, job_id):
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise ValueError("续训实验ID无效")
+        folder = self.runtime / job_id
+        record = json.loads((folder / "process.json").read_text())
+        config = yaml.safe_load((folder / "experiment.yaml").read_text())
+        if config.get("episode_review") is not True or record.get("mock"):
+            raise ValueError("只支持已有GUI复核训练，不支持模拟/普通SFT实验")
+        output = Path(config["output_dir"])
+        if not output.is_absolute():
+            output = self.root / output
+        checkpoint = output / f"{config['run_name']}_rl" / "checkpoints"
+        steps = sorted(int(p.name) for p in checkpoint.glob("*")
+                       if p.is_dir() and p.name.isdigit())
+        if not steps:
+            raise ValueError("尚无已保存模型checkpoint，不能续训")
+        latest = steps[-1]
+        # 数字目录必须由Orbax提交完成，辅助复核状态及W&B身份也必须配套。
+        if not (checkpoint / str(latest) / "_CHECKPOINT_METADATA").is_file():
+            raise ValueError("最新checkpoint缺少Orbax提交元数据，不能续训")
+        state = json.loads((checkpoint / f"review_state_{latest}.json").read_text())
+        if any(type(state.get(k)) is not int or state[k] < 0 for k in ("credit", "update_count")):
+            raise ValueError("复核训练状态无效")
+        if not (checkpoint / "wandb_id.txt").read_text().strip():
+            raise ValueError("缺少原W&B实验身份")
+        return config, latest, str(checkpoint)
+
+    def runs(self):
+        result, seen = [], set()
+        records = []
+        for path in self.runtime.glob("*/process.json"):
+            try:
+                value = json.loads(path.read_text())
+                if not value.get("mock"):
+                    records.append(value)
+            except (OSError, ValueError):
+                continue
+        for record in sorted(records, key=lambda r: r.get("started_at", 0), reverse=True):
+            if record["run_name"] in seen:
+                continue
+            seen.add(record["run_name"])
+            item = {"id": record["id"], "run_name": record["run_name"],
+                    "started_at": record.get("started_at"), "resumable": False}
+            try:
+                config, step, checkpoint = self.resume_info(record["id"])
+                item.update(resumable=True, step=step, update_count=json.loads(
+                    (Path(checkpoint) / f"review_state_{step}.json").read_text())["update_count"],
+                    max_steps=config["max_steps"])
+            except (OSError, ValueError, KeyError) as error:
+                item["reason"] = str(error)
+            result.append(item)
+        return result[:100]
+
     def status(self):
         path, record = self.record()
         if record is None:
-            return {"phase": "idle", "running": False, "log_tail": ""}
+            return {"phase": "idle", "running": False, "log_tail": "", "runs": self.runs()}
         running = owned(record)
         stopping = (path.parent / "stop_requested").exists()
         if running:
@@ -87,17 +141,33 @@ class ServiceManager:
             with log.open("rb") as handle:
                 handle.seek(max(0, log.stat().st_size - 20000))
                 tail = handle.read(20000).decode("utf-8", errors="replace")
-        return {**record, "phase": phase, "running": running, "log_tail": tail}
+        return {**record, "phase": phase, "running": running, "log_tail": tail, "runs": self.runs()}
 
-    def start(self, config_path, *, mock=False):
+    def start(self, config_path, *, mock=False, resume_run=None, additional_steps=None):
         with self.lock():
+            if additional_steps is not None and (
+                resume_run is None or type(additional_steps) is not int or not 1 <= additional_steps <= 10_000_000
+            ):
+                raise ValueError("续训追加步数必须为1到10000000整数，且必须选择历史实验")
+            if mock and resume_run is not None:
+                raise ValueError("模拟服务不支持模型续训")
             current = self.status()
             if current["running"]:
+                if resume_run is not None or additional_steps is not None:
+                    raise RuntimeError("请先停止当前训练，再选择续训实验")
                 if current.get("mock") != mock:
                     raise RuntimeError("已有另一运行模式的GUI服务，请先停止")
                 return current
             source = resolve_path(config_path)
             config = load_config(str(source))
+            resume_step = None
+            if resume_run is not None:
+                config, resume_step, _ = self.resume_info(resume_run)
+                if additional_steps is not None:
+                    # 只扩展采集预算；模型、数据、资产、run_name沿用原实验快照。
+                    config["max_steps"] = max(config["max_steps"], resume_step + additional_steps)
+                if config["max_steps"] <= resume_step:
+                    raise ValueError("原动作预算已完成，请填写续训追加步数")
             if config.get("episode_review") is not True:
                 raise ValueError("仅允许启动GUI专用复核RL配置")
             if listening(config["port"]):
@@ -114,13 +184,15 @@ class ServiceManager:
             job_id = uuid.uuid4().hex
             folder = self.runtime / job_id
             folder.mkdir()
-            # 所有输出仍在原output_dir，只有run名独立，绝不resume/覆盖既有训练。
-            config["run_name"] = f"{config['run_name']}_{time.strftime('%Y%m%d_%H%M%S')}_{job_id[:6]}"
+            # 每次启动保留独立管理日志；续训复用原训练目录，不新建模型实验。
+            if resume_run is None:
+                config["run_name"] = f"{config['run_name']}_{time.strftime('%Y%m%d_%H%M%S')}_{job_id[:6]}"
             snapshot = folder / "experiment.yaml"
             snapshot.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
             record = {"id": job_id, "run_name": config["run_name"], "port": config["port"],
                       "config": str(snapshot), "source_config": str(source), "mock": mock,
-                      "log": str(folder / "server.log"), "started_at": time.time()}
+                      "log": str(folder / "server.log"), "started_at": time.time(),
+                      "resume_run": resume_run, "resume_step": resume_step}
             write_json(folder / "process.json", record)
             # 管理器是独立进程组的组长；即使SSH断开，也能继续记录退出码并管理整棵进程树。
             with Path(record["log"]).open("ab") as output:
@@ -176,6 +248,8 @@ class ServiceManager:
                        str(record["port"])]
         else:
             command = ["bash", "scripts/server.sh", "rl", "--config", record["config"]]
+            if record.get("resume_run"):
+                command.append("--resume")
         if (folder / "stop_requested").exists():
             record.update(exit_code=130, ended_at=time.time())
         else:
@@ -189,6 +263,8 @@ def main():
     parser.add_argument("action", nargs="?", choices=("start", "stop", "status"))
     parser.add_argument("--config", default="configs/server/rotating_square.gui.yaml")
     parser.add_argument("--worker")
+    parser.add_argument("--resume-run")
+    parser.add_argument("--additional-steps", type=int)
     parser.add_argument("--mock", action="store_true", help="仅命令行管理链路验收；不训练、不连接机器人")
     args = parser.parse_args()
     manager = ServiceManager()
@@ -196,7 +272,8 @@ def main():
         manager.worker(args.worker)
         return
     try:
-        result = manager.start(args.config, mock=args.mock) if args.action == "start" else (
+        result = manager.start(args.config, mock=args.mock, resume_run=args.resume_run,
+                               additional_steps=args.additional_steps) if args.action == "start" else (
             manager.stop() if args.action == "stop" else manager.status())
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:

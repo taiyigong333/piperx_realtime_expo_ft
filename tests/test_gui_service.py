@@ -95,14 +95,16 @@ def test_gui_remote_stop_locks_local_device_first(tmp_path):
     controller = GUIController(load_config("configs/client/gui.mock.yaml"), tmp_path)
     events = []
     controller.remote_server = SimpleNamespace(request=lambda action: events.append(action))
-    controller.env = SimpleNamespace(close=lambda: events.append("local_close"))
+    controller.env = SimpleNamespace(close=lambda: events.append("local_close"),
+                                     emergency_stop=lambda: events.append("emergency"),
+                                     closed=threading.Event())
     try:
         controller.command("server_start", {})
         assert events == ["start"]
         with pytest.raises(ValueError, match="覆盖"):
             controller.command("server_start", {"ssh_host": "elsewhere"})
         controller.command("server_stop", {})
-        assert events[-2:] == ["local_close", "stop"]
+        assert events[-3:] == ["emergency", "local_close", "stop"]
         assert controller.stop_event.is_set()
     finally:
         controller.env = controller.remote_server = None
@@ -181,3 +183,66 @@ def test_start_error_survives_status_refresh(monkeypatch):
         remote.closed.set()
         remote.request("status")
         remote.thread.join(2)
+
+
+def saved_run(tmp_path, *, complete=True):
+    manager = ServiceManager(tmp_path)
+    job_id = "a" * 32
+    folder = manager.runtime / job_id
+    folder.mkdir()
+    config = {"episode_review": True, "run_name": "original", "output_dir": str(tmp_path / "runs"),
+              "max_steps": 100, "port": 8103}
+    (folder / "experiment.yaml").write_text(yaml.safe_dump(config))
+    (folder / "process.json").write_text(json.dumps({
+        "id": job_id, "run_name": "original", "mock": False, "started_at": 1}))
+    checkpoints = tmp_path / "runs/original_rl/checkpoints"
+    (checkpoints / "80").mkdir(parents=True)
+    (checkpoints / "wandb_id.txt").write_text("same-wandb-id")
+    if complete:
+        (checkpoints / "80/_CHECKPOINT_METADATA").write_text("{}")
+        (checkpoints / "review_state_80.json").write_text(json.dumps({"credit": 2, "update_count": 3}))
+    return manager, job_id, checkpoints
+
+
+def test_resume_catalog_requires_matching_saved_state(tmp_path):
+    manager, job_id, checkpoints = saved_run(tmp_path)
+    assert manager.resume_info(job_id)[1] == 80
+    assert manager.runs()[0]["resumable"]
+    assert manager.runs()[0]["update_count"] == 3
+    (checkpoints / "review_state_80.json").unlink()
+    assert not manager.runs()[0]["resumable"]
+    with pytest.raises(ValueError, match="ID"):
+        manager.resume_info("../other")
+
+
+def test_resume_reuses_experiment_and_passes_resume_flag(tmp_path, monkeypatch):
+    import piperx_expo.server.gui_service as service_module
+
+    manager, job_id, checkpoints = saved_run(tmp_path)
+    monkeypatch.setattr(manager, "status", lambda: {"running": False})
+    monkeypatch.setattr(service_module, "listening", lambda _: False)
+    monkeypatch.setattr(service_module, "process_ticks", lambda _: "123")
+    monkeypatch.setattr("piperx_expo.server.launch.validate", lambda *_: None)
+    monkeypatch.setattr(service_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=""))
+    calls = []
+    monkeypatch.setattr(service_module.subprocess, "Popen",
+                        lambda argv, **kw: calls.append(argv) or SimpleNamespace(pid=999, wait=lambda: 0))
+    # 当前配置故意不同；续训必须沿用所选实验，而非当前默认run_name。
+    source = tmp_path / "current.yaml"
+    source.write_text(yaml.safe_dump({"run_name": "different"}))
+    manager.start(str(source), resume_run=job_id, additional_steps=200)
+    path, record = manager.record()
+    config = yaml.safe_load(Path(record["config"]).read_text())
+    assert config["run_name"] == "original" and config["max_steps"] == 280
+    assert record["resume_step"] == 80 and record["resume_run"] == job_id
+    monkeypatch.setattr(service_module.signal, "signal", lambda *_: None)
+    manager.worker(record["id"])
+    assert "--resume" in calls[-1]
+    assert (checkpoints / "wandb_id.txt").read_text() == "same-wandb-id"
+
+
+def test_partial_checkpoint_and_finished_budget_are_rejected(tmp_path):
+    manager, job_id, checkpoints = saved_run(tmp_path, complete=False)
+    assert not manager.runs()[0]["resumable"]
+    with pytest.raises(ValueError, match="提交元数据"):
+        manager.resume_info(job_id)

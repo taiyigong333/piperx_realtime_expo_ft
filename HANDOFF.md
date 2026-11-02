@@ -7,7 +7,8 @@
 - 任务：抓取旋转红色方块；piperx执行和采集，4090负责模型推理、RTC-SFT与在线RL。
 - 动作为7维米制绝对法兰XYZ＋RPY(rad)＋夹爪宽度(m)；VLA内部使用原checkpoint的delta，右腕进入right槽位，不能改成DROID速度或夹爪概率。
 - client Python3.10、server Python3.11、根轻量环境独立；仅用uv及已提交锁文件，外部代码保持固定子模块。
-- CLI保留；GUI支持服务器启停、逐条复核/自动收录、双相机回放和独立机械臂按钮。
+- CLI保留；GUI支持服务器启停/选择历史实验续训、逐条复核/自动收录、双相机回放和独立机械臂按钮。
+- 本轮修改：正式策略速度90%、位移0.3m、每轴旋转0.5rad、夹爪0～0.10m；归位仍10%。GUI相机随进程常驻，rollout开始才写盘；顶部按钮/Esc先锁存当前位置并禁止后续动作，保持失败回退阻尼急停。软件回归及部署结果见下述记录。
 
 ## 最近已确认状态
 
@@ -25,7 +26,10 @@
 | 4090 | gh4090piper | /data/gcj_data/rl/real_time_expo_ft/code |
 | piperx | piperx | /home/cv/gcj/rl/baseline/realtime_expo_ft |
 
-GUI在piperx启动：`bash scripts/gui.sh --config configs/client/rotating_square.calibrated.yaml --record-dir /home/cv/gcj/rl/data/realtime_expo_ft/gui_episodes --allow-motion --port 8767`。端口占用可改8768；模型通信仍为192.168.50.2:8103。[完整操作说明](docs/浏览器客户端使用说明.md)。
+GUI在piperx启动：`bash scripts/gui.sh --config configs/client/rotating_square.calibrated.yaml --record-dir /home/cv/gcj/rl/data/realtime_expo_ft/gui_episodes --allow-motion --port 8888`。本轮按用户要求只保留8888；模型通信仍为192.168.50.2:8103。[完整操作说明](docs/浏览器客户端使用说明.md)。
+
+- 2026-11-02本轮只读核对：现有两次GUI实验均无数字模型checkpoint，仅有wandb_id，不能从其中恢复未保存模型。新GUI配置每个完整回合保存；有配套checkpoint/复核状态的实验才可在页面续训。
+- 本轮验证/部署进行中，最终结果见[本轮记录](docs/历史/数据与控制/2026-11-02_动作放宽常驻相机与GUI续训.md)。
 
 ## 接手优先事项
 

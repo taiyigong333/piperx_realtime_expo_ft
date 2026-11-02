@@ -36,6 +36,7 @@ class PiperXEnv:
         if self.real:
             # close先置位此事件，使归位等待能退出，避免停止按钮被控制锁阻塞30秒。
             self.device.reset_cancel = self.closed
+        self.device_closed = False
         self.armed = False
         self.fault = False
         self.steps = 0
@@ -129,11 +130,18 @@ class PiperXEnv:
         self.last_info = (done, success, float(success), 0.0 if success else 1.0)
         return self.last_info
 
+    def emergency_stop(self):
+        # 不等待归位持有的环境锁，也不等待相机/网络IO，先让硬件停止。
+        self.closed.set()
+        self.armed = False
+        self.fault = True
+        self.device.stop_hold()
+
     def close(self):
-        if self.closed.is_set():
-            return
         self.closed.set()
         with self.lock:
             self.armed = False
-            self.device.close()
+            if not self.device_closed:
+                self.device_closed = True
+                self.device.close()
         self.thread.join(timeout=2)

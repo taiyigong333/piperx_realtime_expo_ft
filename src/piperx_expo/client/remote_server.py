@@ -33,20 +33,33 @@ class RemoteServer:
                     "stopping": "stop" in self.pending,
                     "ssh_host": self.config["ssh_host"]}
 
-    def request(self, action):
+    def request(self, action, **values):
         if action not in {"start", "stop", "status"}:
             raise ValueError("未知服务器操作")
+        if values:
+            if action != "start" or set(values) - {"resume_run", "additional_steps"}:
+                raise ValueError("不允许覆盖服务器启动参数")
+            if not re.fullmatch(r"[0-9a-f]{32}", str(values.get("resume_run", ""))):
+                raise ValueError("续训实验ID无效")
+            if "additional_steps" in values and (
+                type(values["additional_steps"]) is not int or not 1 <= values["additional_steps"] <= 10_000_000
+            ):
+                raise ValueError("续训追加步数无效")
         with self.lock:
             if action in self.pending:
                 return
             self.pending.add(action)
-        self.actions.put(action)
+        self.actions.put((action, values))
 
-    def call(self, action):
+    def call(self, action, **values):
         # HTTP不能覆盖这些配置或传入远端shell命令；路径统一shell引用，SSH禁用交互密码等待。
         command = (f"cd {shlex.quote(self.config['project_dir'])} && "
                    '"$HOME/.local/bin/uv" run --locked python -m piperx_expo.server.gui_service '
                    f"{action} --config {shlex.quote(self.config['config'])}")
+        if values:
+            command += f" --resume-run {shlex.quote(values['resume_run'])}"
+            if "additional_steps" in values:
+                command += f" --additional-steps {int(values['additional_steps'])}"
         result = subprocess.run(
             ["ssh", "-oBatchMode=yes", "-oConnectTimeout=5", "-oServerAliveInterval=5",
              "-oServerAliveCountMax=2", self.config["ssh_host"], command],
@@ -61,11 +74,11 @@ class RemoteServer:
     def _run(self):
         while not self.closed.is_set():
             try:
-                action = self.actions.get(timeout=2)
+                action, values = self.actions.get(timeout=2)
             except queue.Empty:
-                action = "status"
+                action, values = "status", {}
             try:
-                value = self.call(action)
+                value = self.call(action, **values)
                 with self.lock:
                     if action != "status":
                         self.action_error = ""

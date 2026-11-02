@@ -98,7 +98,21 @@ $("ready").onclick = () => {
   command("ready");
 };
 $("stop").onclick = () => command("stop");
-$("server-start").onclick = () => command("server_start");
+// 即使焦点在输入框/回放页，Esc也直接请求停止，不弹确认框。
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !event.repeat) {
+    event.preventDefault();
+    command("stop");
+  }
+});
+$("server-start").onclick = () => {
+  const run = $("server-training").value;
+  command("server_start", run ? {resume_run: run, additional_steps: Number($("resume-budget").value)} : {});
+};
+$("server-training").onchange = () => {
+  $("resume-budget-label").hidden = !$("server-training").value;
+  $("server-start").textContent = $("server-training").value ? "继续所选训练" : "启动新训练";
+};
 $("server-stop").onclick = () => command("server_stop");
 for (const [id, action] of [["recover-enable", "recover_enable"], ["hold-position", "hold_position"], ["home-arm", "home_arm"], ["cancel-hold", "cancel_hold"]]) {
   $(id).onclick = () => command(action, {motion_confirmed: $("motion-confirm").checked});
@@ -141,7 +155,7 @@ function images() {
         $("camera-" + c),
         `/api/episode/${selected.id}/frame?camera=${c}&index=${replayFrame}`,
       );
-  } else if (current?.state) {
+  } else if (current?.camera_ready || current?.state) {
     for (let c = 0; c < 2; c++)
       loadImage($("camera-" + c), `/api/frame?camera=${c}&t=${Date.now()}`);
   }
@@ -257,12 +271,34 @@ function render(s) {
       listening: s.connected ? "学习器已连接" : "可连接学习器", stopping: "正在停止", stopped: "已停止",
       completed: "训练结束", failed: "启动失败或异常退出"};
     $("server-phase").textContent = remote.busy ? "正在处理操作" : (names[remote.phase] || remote.phase);
+    const selector = $("server-training");
+    const signature = JSON.stringify(remote.runs || []);
+    if (selector.dataset.runs !== signature) {
+      const previous = selector.value;
+      selector.replaceChildren(new Option("新建训练", ""));
+      for (const run of remote.runs || []) {
+        const label = run.resumable
+          ? `${run.run_name} · 第${run.step}步 / 更新${run.update_count}次`
+          : `${run.run_name} · ${run.reason || "不可续训"}`;
+        const option = new Option(label, run.id);
+        option.disabled = !run.resumable;
+        selector.add(option);
+      }
+      if ([...selector.options].some(o => o.value === previous && !o.disabled)) selector.value = previous;
+      selector.dataset.runs = signature;
+      selector.onchange();
+    }
+    selector.disabled = remote.busy || remote.running;
+    $("resume-budget").disabled = remote.busy || remote.running;
+    $("resume-hint").textContent = selector.value
+      ? "从最近完整checkpoint接续原实验、经验与更新计数；追加步数从该保存点计算。"
+      : "可从列表选择历史实验。未保存模型checkpoint的实验不能恢复；停止不会额外强制保存。";
     $("server-start").disabled = remote.busy || remote.running;
     $("server-stop").disabled = remote.phase === "idle" && !remote.busy;
     $("server-hint").textContent = remote.error || (remote.mock
       ? "当前为管理链路模拟服务，不加载模型、不训练。"
       : "先启动服务器 RL，再连接学习器并确认现场归位。停止会先锁定本机机械臂。模型初始化可能需要数分钟。");
-    $("server-run").textContent = remote.run_name || "每次启动会自动创建独立 run";
+    $("server-run").textContent = remote.run_name || "选择新建训练或继续已有实验";
     const log = remote.log_tail || "暂无日志";
     if ($("server-log").textContent !== log) $("server-log").textContent = log;
   }
@@ -402,7 +438,7 @@ function render(s) {
   const prompt = prompts[phase] || ["", ""];
   $("action-title").textContent = prompt[0];
   $("action-hint").textContent = prompt[1];
-  if (s.error) notice(s.error, true);
+  if (s.error || s.camera_error) notice(s.error || s.camera_error, true);
   else if ($("notice").classList.contains("error")) notice("");
   if (!selected) {
     $("scrubber").max = ep?.steps || 0;

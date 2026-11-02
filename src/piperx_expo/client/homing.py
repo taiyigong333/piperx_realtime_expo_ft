@@ -1,5 +1,6 @@
 """固定关节归位；只在现场确认后调用，不向策略经验写入归位动作。"""
 
+from contextlib import nullcontext
 import logging
 import time
 
@@ -85,6 +86,12 @@ def fixed_joint_home(device, home):
         if cancel.is_set():
             raise InterruptedError("归位已停止，禁止继续发送目标")
 
+    def send(method, *args):
+        # 与急停共用发送锁，禁止“检查取消后、发目标前”被抢占而覆盖保持目标。
+        with getattr(device, "motion_lock", nullcontext()):
+            check_cancel()
+            return method(*args)
+
     def feedback(getter, shape):
         return _home_feedback(device, getter, shape)
 
@@ -101,8 +108,8 @@ def fixed_joint_home(device, home):
 
     def activate(mode, speed):
         check_cancel()
-        arm.set_speed_percent(speed)
-        arm.set_motion_mode(mode)
+        send(arm.set_speed_percent, speed)
+        send(arm.set_motion_mode, mode)
         sent_at = time.time()
         deadline = time.monotonic() + home["control_ready_timeout_s"]
         expected = getattr(arm.ARM_STATUS.ModeFeedback, "MOVE_J" if mode == "j" else "MOVE_P")
@@ -130,7 +137,7 @@ def fixed_joint_home(device, home):
     deadline = time.monotonic() + home["control_ready_timeout_s"]
     while True:
         check_cancel()
-        if arm.enable():
+        if send(arm.enable):
             break
         if time.monotonic() >= deadline:
             raise TimeoutError("归位使能超时")
@@ -139,7 +146,7 @@ def fixed_joint_home(device, home):
     check_cancel()
     LOG.info("归位目标(rad)=%s，起点(rad)=%s", target.tolist(), joints.tolist())
     sent_at = time.time()
-    arm.move_j(target.tolist())  # 固件规划关节路径；不能改用无平滑 move_js 或猜测 TCP 起点。
+    send(arm.move_j, target.tolist())  # 固件规划关节路径；不能改用无平滑 move_js 或猜测 TCP 起点。
     deadline, next_log = time.monotonic() + home["timeout_s"], 0.0
     while True:
         joints, stamp = feedback(arm.get_joint_angles, (6,))

@@ -10,13 +10,13 @@ rpc_timeout_s: null
 feedback_timeout_s: 0.2
 camera_timeout_s: 0.3
 collection_config: configs/local/collection.yaml
-# 复用同机既有GUI的现场范围；不等于通过碰撞/路径验收，速度和步长仍用EXPO保守值。
+# 按用户要求对齐baseline_fast/openpi的策略速度与单目标距离；固定归位仍为10%。
 workspace_m: [[-0.02, 1.0], [-1.0, 1.0], [0.0, 1.0]]
-max_translation_step_m: 0.005
-max_rotation_step_rad: 0.05
-gripper_range_m: [0.0, 0.08]
-max_gripper_step_m: 0.005
-speed_percent: 10
+max_translation_step_m: 0.3
+max_rotation_step_rad: 0.5
+gripper_range_m: [0.0, 0.10]
+max_gripper_step_m: 0.10 # 允许合法范围内一次张合，与参考客户端一致。
+speed_percent: 90
 gripper_force_n: 1.0
 success_detector: piperx_expo.client.success:GraspSuccessDetector
 success_detector_config:

@@ -89,11 +89,11 @@ def create_server(controller, host="127.0.0.1", port=8767):
                     self.send_json(controller.history())
                 elif path == "/api/frame":
                     camera = int(parse_qs(parsed.query).get("camera", ["0"])[0])
-                    if camera not in (0, 1) or controller.latest_obs is None:
+                    if camera not in (0, 1):
                         self.send_json({"error": "暂无画面"}, 404)
                         return
                     output = io.BytesIO()
-                    Image.fromarray(controller.latest_obs[IMAGE_KEYS[camera]]).save(
+                    Image.fromarray(controller.frame(camera)).save(
                         output, "JPEG", quality=85
                     )
                     self.send_bytes(output.getvalue(), "image/jpeg")
@@ -124,7 +124,7 @@ def create_server(controller, host="127.0.0.1", port=8767):
                     self.send_bytes(data, mimetypes.guess_type(file.name)[0] or "text/plain")
                 else:
                     self.send_json({"error": "页面不存在"}, 404)
-            except (ValueError, KeyError, IndexError, OSError) as error:
+            except (ValueError, KeyError, IndexError, OSError, RuntimeError) as error:
                 self.send_json({"error": str(error)}, 400)
 
         def do_POST(self):
@@ -173,7 +173,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        controller.stop()
+        controller.shutdown()
         # shutdown不能从serve_forever线程调用；此处已经退出服务循环。
         server.server_close()
         if controller.worker:

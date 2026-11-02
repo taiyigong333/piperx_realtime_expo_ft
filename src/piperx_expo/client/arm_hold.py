@@ -97,9 +97,10 @@ def _enable_confirmation(arm, timeout, sent_at=0):
 
 
 class ArmHold:
-    def __init__(self, config, heartbeat, action="enable"):
+    def __init__(self, config, heartbeat, action="enable", device_factory=None):
         if action not in {"enable", "hold", "home"}:
             raise ValueError("未知机械臂手动操作")
+        self.device_factory = device_factory
         self.action = action
         self.config = config
         self.heartbeat = heartbeat
@@ -124,7 +125,7 @@ class ArmHold:
                 from piperx_expo.client.devices import PiperXDevices
 
                 # 固定复位沿用原设备/相机预检和全部归位检查，不单独绕过运动前检查。
-                full_device = PiperXDevices(self.config)
+                full_device = (self.device_factory or PiperXDevices)(self.config)
                 full_device.reset_cancel = self.cancel
                 arm = full_device.arm
                 device = full_device
@@ -201,7 +202,9 @@ class ArmHold:
                 if full_device is not None:
                     full_device.close(stop_motion=not released)
                 elif arm is not None and not released:
-                    arm.electronic_emergency_stop()
+                    from piperx_expo.client.devices import freeze_position
+
+                    freeze_position(arm, self.config)
             finally:
                 if robot is not None:
                     robot.stop()

@@ -155,7 +155,7 @@ def test_three_commands_dispatch_separate_operations(monkeypatch, tmp_path):
     calls = []
 
     class Session:
-        def __init__(self, config, heartbeat, action):
+        def __init__(self, config, heartbeat, action, device_factory=None):
             calls.append(action)
             self.thread = SimpleNamespace(is_alive=lambda: False)
             self.action = action

@@ -9,11 +9,15 @@ from pathlib import Path
 import numpy as np
 
 from piperx_expo.client.arm_hold import ArmHold
+from piperx_expo.client.cameras import CameraStream
+from piperx_expo.client.devices import PiperXDevices
 from piperx_expo.client.environment import PiperXEnv
 from piperx_expo.client.recording import EpisodeRecorder
 from piperx_expo.client.rpc import run_client
 from piperx_expo.client.remote_server import RemoteServer
+from piperx_expo.client.safety import validate_client_config
 from piperx_expo.review import PROTOCOL, observation_state, resolve_review
+from piperx_expo.observation import IMAGE_KEYS, make_observation
 
 
 class GUIController:
@@ -43,6 +47,59 @@ class GUIController:
         self.remote_server = RemoteServer(self.config["remote_server"]) if self.config.get("remote_server") else None
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
         self.heartbeat_thread.start()
+        self.cameras = None
+        self.camera_error = ""
+        self.camera_ready = threading.Event()
+        self.shutdown_event = threading.Event()
+        self.camera_thread = None
+        if self.config["backend"] == "piperx":
+            # 相机与GUI同寿命；不依赖学习器连接、归位或每条回合的录制状态。
+            self.camera_thread = threading.Thread(target=self._start_cameras, daemon=True)
+            self.camera_thread.start()
+
+    def _start_cameras(self):
+        try:
+            self.cameras = CameraStream(self.config)
+        except Exception as error:
+            self.camera_error = str(error)
+        finally:
+            self.camera_ready.set()
+
+    def _device(self, config, *, ignore_stop=False):
+        validate_client_config(config)  # 与CLI一致，在创建CAN设备前检查配置。
+        while not self.camera_ready.wait(0.05):
+            if (not ignore_stop and self.stop_event.is_set()) or self.shutdown_event.is_set():
+                raise InterruptedError("设备连接已取消")
+        if self.cameras is None:
+            raise RuntimeError("相机启动失败：" + self.camera_error)
+        if (not ignore_stop and self.stop_event.is_set()) or self.shutdown_event.is_set():
+            raise InterruptedError("设备连接已取消")
+        self.cameras.read_images()
+        return PiperXDevices(config, cameras=self.cameras)
+
+    def frame(self, camera):
+        if self.cameras is not None:
+            # 图像预览只读常驻缓存，不能触发CAN、磁盘写入或重开相机。
+            images = self.cameras.read_images()
+            observation = make_observation(
+                np.zeros(7), images, self.config["language_instruction"]
+            )
+            return observation[IMAGE_KEYS[camera]]
+        if self.latest_obs is None:
+            raise ValueError(self.camera_error or "暂无画面")
+        return self.latest_obs[IMAGE_KEYS[camera]]
+
+    def shutdown(self):
+        self.shutdown_event.set()
+        try:
+            self.stop()
+            if self.worker:
+                self.worker.join(timeout=5)
+        finally:
+            if self.camera_thread:
+                self.camera_thread.join()
+            if self.cameras:
+                self.cameras.close()
 
     def _heartbeat_watch(self):
         while not self.stop_event.wait(0.25):
@@ -58,8 +115,19 @@ class GUIController:
         with self.condition:
             self.last_heartbeat = time.monotonic()
             meta = self.recorder.snapshot() if self.recorder else None
+            camera_ok = False
+            if self.cameras is not None:
+                try:
+                    self.cameras.read_images()
+                    camera_ok = True
+                    self.camera_error = ""
+                except RuntimeError as error:
+                    self.camera_error = str(error)
             return {
                 "arm_hold": self.arm_hold.snapshot() if self.arm_hold else {"running": False, "phase": "idle"},
+                "camera_ready": camera_ok,
+                "stop_status": getattr(self.env.device, "stop_result", "") if self.env else "",
+                "camera_error": self.camera_error,
                 "phase": self.phase,
                 "error": self.error,
                 "backend": self.config["backend"],
@@ -237,9 +305,16 @@ class GUIController:
                 raise RuntimeError("禁止在已建立会话中重建硬件")
             if self.arm_hold:
                 self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] in {"enable_sent", "enabled", "holding", "homed"})
-            self.env = PiperXEnv(
-                copy.deepcopy(self.config), self.allow_motion, reset_confirm=self._reset_confirm
-            )
+            device = self._device(self.config) if self.config["backend"] == "piperx" else None
+            with self.condition:
+                if self.stop_event.is_set():
+                    if device is not None:
+                        device.close()
+                    raise InterruptedError("设备连接已取消")
+                self.env = PiperXEnv(
+                    copy.deepcopy(self.config), self.allow_motion, reset_confirm=self._reset_confirm,
+                    device=device
+                )
             self.latest_obs = self.env.get_observation()
             return {
                 "status": "success",
@@ -349,12 +424,12 @@ class GUIController:
         if action in {"server_start", "server_stop", "server_status"}:
             if not self.remote_server:
                 raise ValueError("此配置未启用远程服务器管理")
-            if values:
+            if values and (action != "server_start" or set(values) - {"resume_run", "additional_steps"}):
                 raise ValueError("服务器管理不接受覆盖SSH或启动命令")
             if action == "server_stop":
                 self.stop()  # 先停止本地运动，再发远程停止请求。
             else:
-                self.remote_server.request(action.removeprefix("server_"))
+                self.remote_server.request(action.removeprefix("server_"), **values)
         elif action == "start":
             self.start(bool(values.get("demo", False)), values.get("motion_confirmed") is True)
         elif action in {"recover_enable", "hold_position", "home_arm"}:
@@ -368,7 +443,9 @@ class GUIController:
                         raise ValueError("上一机械臂操作尚未完成")
                     self.arm_hold.close(release=True)
                 operation = {"recover_enable": "enable", "hold_position": "hold", "home_arm": "home"}[action]
-                self.arm_hold = ArmHold(copy.deepcopy(self.config), lambda: self.last_heartbeat, action=operation)
+                # 手动复位借用同一相机流；恢复/保持仍只连接CAN。
+                self.arm_hold = ArmHold(copy.deepcopy(self.config), lambda: self.last_heartbeat,
+                                        action=operation, device_factory=lambda cfg: self._device(cfg, ignore_stop=True))
         elif action == "cancel_hold":
             with self.condition:
                 if self.arm_hold and self.arm_hold.action == "hold":
@@ -399,6 +476,8 @@ class GUIController:
             self.phase = "fault" if error else "stopped"
             self.stop_event.set()
             self.condition.notify_all()
+        if self.env is not None and not self.env.closed.is_set():
+            self.env.emergency_stop()
         if self.arm_hold:
             self.arm_hold.close()
         # 先切断控制，再等IO和连接退出；复核等待不会占用env锁。

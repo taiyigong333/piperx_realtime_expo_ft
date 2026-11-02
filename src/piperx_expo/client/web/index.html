@@ -48,7 +48,7 @@
             </h1>
             <p id="subtitle">观察执行，复核结果，让每次尝试成为可靠的经验。</p>
           </div>
-          <button id="stop" class="button danger-outline">■ 停止并锁定</button>
+          <button id="stop" class="button danger-outline">■ 急停 · Esc</button>
         </div>
         <div id="notice" class="notice" role="status" aria-live="polite"></div>
         <section id="view-run" class="view">
@@ -60,6 +60,14 @@
                 <button id="server-start" class="button primary">启动服务器 RL</button>
                 <button id="server-stop" class="button danger-outline">停止服务器 RL</button>
               </div>
+            </div>
+            <div class="server-training-options">
+              <label for="server-training">训练方式</label>
+              <select id="server-training"><option value="">新建训练</option></select>
+              <label id="resume-budget-label" hidden>续训追加动作步数
+                <input id="resume-budget" type="number" min="1" max="10000000" value="4000" />
+              </label>
+              <p id="resume-hint"></p>
             </div>
             <p id="server-hint">从机器人电脑管理服务器，每次启动创建独立训练记录。</p>
             <div id="server-run" class="mono"></div>
