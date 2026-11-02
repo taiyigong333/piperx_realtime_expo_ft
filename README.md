@@ -1,12 +1,12 @@
 # Piper-X Real-Time EXPO-FT
 
-新会话接手请先阅读[当前HANDOFF](HANDOFF.md)，再按其中链接查阅历史记录与操作说明。
+新会话接手请先阅读[当前HANDOFF](HANDOFF.md)。全部资料见[文档导航](docs/README.md)：持续维护文档保留在docs根目录，历史记录按类别与日期归档。
 
 用于“抓取旋转红色方块”的复现工程：机器人客户端负责数据采集、相机与机械臂执行，GPU 服务器负责 pi0.5 推理、RTC-SFT 与 Real-Time EXPO-FT 更新。
 
-服务器位置：`gh4090piper:/data/gcj_data/rl/real_time_expo_ft/code`；客户端部署位置：`piperx:/home/cv/gcj/rl/baseline/realtime_expo_ft`。通过有线网192.168.50.2/192.168.50.1通信，部署步骤见[有线部署说明](docs/有线部署.md)。
+服务器位置：`gh4090piper:/data/gcj_data/rl/real_time_expo_ft/code`；客户端部署位置：`piperx:/home/cv/gcj/rl/baseline/realtime_expo_ft`。通过有线网192.168.50.2/192.168.50.1通信，部署步骤见[有线部署说明](docs/历史/部署/2026-10-26_有线部署.md)。
 
-当前四批数据的30帧pi0.5 checkpoint接入与完整训练步骤，见 [Real-Time EXPO-FT完整训练流程](docs/Real-Time-EXPO-FT完整训练流程.md)。本次现场配置和已执行验证见 [真机RL配置执行记录](docs/真机RL配置执行记录.md)。已完成数据/模型接入与只读标定，正式RTC-SFT已启动，进度与W&B见[训练记录](docs/RTC-SFT训练记录_20261031.md)；真实RL尚未启动。下方原始示例保留用于从原始数据搭建新任务。
+四批数据的30帧pi0.5 checkpoint接入与操作步骤见[完整训练流程](docs/Real-Time-EXPO-FT完整训练流程.md)。正式batch32 RTC-SFT最后一次核对已正常退出，最终参数恢复、真实模型延迟和现场闭环仍需验收；最新已确认状态及边界以[项目交接](docs/项目交接.md)为准。训练过程见[历史记录](docs/历史/训练/2026-10-31_RTC-SFT训练记录.md)，不能将记录当时的“正在运行”作为当前状态。下方保留从原始数据搭建新任务的通用入口。
 
 首次启动可直接阅读[真机强化学习快速开始](docs/真机强化学习快速开始.md)，按两台机器的命令顺序操作。
 
@@ -32,7 +32,8 @@ third_party/
   openpi/                # pd-perry/openpi real-time-expo-ft 固定提交
 scripts/                 # 环境准备、采集、启动与软件栈验证
 tests/                   # 动作保护、协议、数据与归一化回归
-docs/                    # 架构、操作说明、实验计划、交接
+docs/                    # 持续维护：导航、当前交接、实验计划、操作与合同
+  历史/                  # 按部署、训练、设计、数据与控制、项目记录分类，日期前缀
 ```
 
 所有外部项目都是 Git 子模块；不复制算法源文件。`scripts/bootstrap.py` 生成 EXPO 所需 OpenPI 路径的相对符号链接，实际代码仍来自 `third_party/openpi`。不需要 DROID 或 ZED SDK。
