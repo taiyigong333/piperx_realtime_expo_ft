@@ -87,6 +87,13 @@ def create_server(controller, host="127.0.0.1", port=8767):
                     self.send_json(controller.state())
                 elif path == "/api/history":
                     self.send_json(controller.history())
+                elif path == "/api/trash":
+                    if self.headers.get("X-Expo-Token") != token:
+                        self.send_json({"error": "会话令牌无效"}, 403)
+                        return
+                    with controller.condition:
+                        records = controller.recycle.records()
+                    self.send_json(records)
                 elif path == "/api/frame":
                     camera = int(parse_qs(parsed.query).get("camera", ["0"])[0])
                     if camera not in (0, 1):

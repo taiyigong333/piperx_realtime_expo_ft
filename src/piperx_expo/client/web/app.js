@@ -117,6 +117,7 @@ function view(name) {
     settings: "调整采集预算，确认连接与现场判定规则。",
   }[name];
   if (name === "run") draw();
+  if (name === "history") { refreshTrash(); if (current?.remote_server?.enabled) command("checkpoint_refresh"); }
 }
 document
   .querySelectorAll(".nav")
@@ -598,6 +599,7 @@ function render(s) {
     ? `Z ${state[2].toFixed(3)} m · G ${(state[6] * 1000).toFixed(1)} mm`
     : "等待观测";
   draw();
+  renderCheckpointStorage(s);
 }
 function table(body, items) {
   body.replaceChildren();
@@ -668,11 +670,101 @@ function table(body, items) {
       link.textContent = " ↓";
       link.title = "下载轨迹HDF5";
       actions.append(play, link);
+      if (body.id === "history-body") {
+        const remove = managementButton("删除", async () => {
+          if (!window.confirm(`将本地轨迹 ${ep.id}（${ep.steps}步）移入回收站？服务器经验和模型保持不变。`)) return;
+          if (await command("delete_episode", {episode_id: ep.id, confirmed: true})) {
+            if (selected?.id === ep.id) selected = null;
+            await refreshHistory(); await refreshTrash();
+            notice("本地轨迹已移入回收站，可恢复；未修改服务器经验或模型。");
+          }
+        }, true);
+        remove.disabled = !current?.can_start || !!current?.arm_hold?.running || ["recording", "review_pending", "submitted", "queued"].includes(ep.status);
+        actions.append(remove);
+      }
     }
     tr.append(actions);
     body.append(tr);
   });
 }
+
+function managementButton(text, click, danger = false) {
+  const button = document.createElement("button");
+  button.className = "text-button" + (danger ? " delete-action" : "");
+  button.textContent = text;
+  button.onclick = click;
+  return button;
+}
+function managementRows(id, entries, cells, action) {
+  const body = $(id);
+  body.replaceChildren();
+  if (!entries.length) {
+    const row = document.createElement("tr"), cell = document.createElement("td");
+    cell.colSpan = 6; cell.textContent = "暂无记录"; row.append(cell); body.append(row); return;
+  }
+  for (const item of entries) {
+    const row = document.createElement("tr");
+    for (const text of cells(item)) {
+      const cell = document.createElement("td"); cell.textContent = text; row.append(cell);
+    }
+    const cell = document.createElement("td"); action(item, cell); row.append(cell); body.append(row);
+  }
+}
+async function refreshTrash() {
+  try {
+    const records = await api("/api/trash");
+    managementRows("episode-trash-body", records, r => [new Date(r.deleted_at * 1000).toLocaleString("zh-CN"), r.names[0]], (r, cell) => {
+      const restore = managementButton("恢复", async () => {
+        if (await command("restore_episode", {trash_id: r.id})) { await refreshHistory(); await refreshTrash(); }
+      });
+      const purge = managementButton("永久删除", async () => {
+        const confirmation = window.prompt(`永久删除本地轨迹 ${r.names[0]}，不可恢复。服务器经验和模型不变。请输入回收记录ID确认：\n${r.id}`);
+        if (confirmation !== r.id) return;
+        if (await command("purge_episode", {trash_id: r.id, confirmation})) await refreshTrash();
+      }, true);
+      restore.disabled = purge.disabled = !current?.can_start || !!current?.arm_hold?.running;
+      cell.append(restore, purge);
+    });
+  } catch (error) { notice(error.message, true); }
+}
+$("refresh-trash").onclick = refreshTrash;
+$("refresh-checkpoints").onclick = () => command("checkpoint_refresh");
+let storageSignature = "";
+function renderCheckpointStorage(s) {
+  const remote = s.remote_server || {};
+  $("checkpoint-card").hidden = !remote.enabled;
+  if (!remote.enabled) return;
+  $("refresh-checkpoints").disabled = !!remote.busy;
+  const storage = remote.storage;
+  if (!storage) return;
+  const signature = JSON.stringify([storage, s.can_start, s.arm_hold?.running, remote.busy, remote.running]);
+  if (signature === storageSignature) return;
+  storageSignature = signature;
+  const busy = !s.can_start || s.arm_hold?.running || remote.busy || remote.running;
+  $("checkpoint-storage-hint").textContent = remote.error || storage.blocked_reason || "移入回收站可以恢复；不会删除训练经验。正在使用或被初始化配置引用的保存点不可删除。";
+  const kinds = {gui_rl: "GUI-RL", rtc_sft: "RTC-SFT", release: "命名版本"};
+  managementRows("checkpoint-body", storage.checkpoints || [], r => [r.kind === "release" ? r.item_id : r.source_label,
+    kinds[r.kind] || r.kind, r.step ?? r.item_id, r.blocked_reason || (r.complete ? "已完整保存" : r.error || "未完成保存")], (r, cell) => {
+    const remove = managementButton("删除", async () => {
+      if (!window.confirm(`将 ${r.source_label} / ${r.item_id}（第${r.step ?? r.item_id}步）移入回收站？删除最新点会回退续训，删完则不能从该实验续训；训练经验保留，命名硬链接版本不受原保存点删除影响。`)) return;
+      await command("checkpoint_delete", {source_id: r.source_id, item_id: r.item_id, confirmation: "confirmed"});
+    }, true);
+    remove.disabled = busy || !!r.blocked_reason;
+    cell.append(remove);
+  });
+  managementRows("checkpoint-trash-body", storage.trash || [], r => [new Date(r.deleted_at * 1000).toLocaleString("zh-CN"),
+    `${r.source_label} / ${r.details?.item_id || r.names.join(", ")}`], (r, cell) => {
+    const restore = managementButton("恢复", () => command("checkpoint_restore", {source_id: r.source_id, trash_id: r.id}));
+    const purge = managementButton("永久删除", async () => {
+      const confirmation = window.prompt(`永久删除 ${r.source_label} / ${r.details?.item_id || r.names[0]}，不可恢复。训练经验保留；如有其他硬链接，空间不一定全部释放。请输入回收记录ID确认：\n${r.id}`);
+      if (confirmation !== r.id) return;
+      await command("checkpoint_purge", {source_id: r.source_id, trash_id: r.id, confirmation});
+    }, true);
+    restore.disabled = purge.disabled = busy || !!r.blocked_reason;
+    cell.append(restore, purge);
+  });
+}
+
 async function refreshHistory() {
   try {
     history = await api("/api/history");

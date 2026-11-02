@@ -34,9 +34,16 @@ class RemoteServer:
                     "ssh_host": self.config["ssh_host"]}
 
     def request(self, action, **values):
-        if action not in {"start", "stop", "status"}:
+        management = {"storage", "trash-checkpoint", "restore-checkpoint", "purge-checkpoint"}
+        if action not in {"start", "stop", "status", *management}:
             raise ValueError("未知服务器操作")
-        if values:
+        if action in management:
+            if set(values) - {"source_id", "item_id", "trash_id", "confirmation"}:
+                raise ValueError("checkpoint管理不接受路径或启动参数")
+            for key in ("source_id", "item_id", "trash_id", "confirmation"):
+                if key in values and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", str(values[key])):
+                    raise ValueError("checkpoint管理标识无效")
+        elif values:
             if action != "start" or set(values) - {"resume_run", "additional_steps", "total_steps", "mode"}:
                 raise ValueError("不允许覆盖服务器启动参数")
             if values.get("mode", "train") not in {"train", "eval"}:
@@ -75,6 +82,9 @@ class RemoteServer:
                 command += f" --total-steps {int(values['total_steps'])}"
             if "mode" in values:
                 command += f" --mode {shlex.quote(values['mode'])}"
+            for key in ("source_id", "item_id", "trash_id", "confirmation"):
+                if key in values:
+                    command += f" --{key.replace('_', '-')} {shlex.quote(values[key])}"
         result = subprocess.run(
             ["ssh", "-oBatchMode=yes", "-oConnectTimeout=5", "-oServerAliveInterval=5",
              "-oServerAliveCountMax=2", self.config["ssh_host"], command],
@@ -97,7 +107,9 @@ class RemoteServer:
                 with self.lock:
                     if action != "status":
                         self.action_error = ""
-                    self.value = {**value, **({"error": self.action_error} if self.action_error else {})}
+                    # 普通状态轮询不重复扫描全部checkpoint，保留按需刷新的管理清单。
+                    retained = {k: self.value[k] for k in ("storage", "storage_result") if k in self.value}
+                    self.value = {**retained, **value, **({"error": self.action_error} if self.action_error else {})}
             except Exception as error:
                 with self.lock:
                     if action != "status":

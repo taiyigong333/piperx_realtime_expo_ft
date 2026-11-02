@@ -324,6 +324,20 @@
               </table>
             </div>
           </article>
+          <article class="card storage-card">
+            <div class="card-title"><span>本地轨迹回收站</span><button id="refresh-trash" class="text-button">刷新</button></div>
+            <p class="muted">轨迹删除只移动本地档案，不撤回服务器经验或已训练模型。恢复不会覆盖同名文件；永久删除才可能释放空间。</p>
+            <div class="table-scroll"><table><thead><tr><th>删除时间</th><th>轨迹ID</th><th>操作</th></tr></thead><tbody id="episode-trash-body"></tbody></table></div>
+          </article>
+          <article id="checkpoint-card" class="card storage-card" hidden>
+            <div class="card-title"><span>服务器 checkpoint 与命名版本</span><button id="refresh-checkpoints" class="text-button">刷新保存点</button></div>
+            <p class="muted">只在服务停止后管理。删除最新保存点会使续训回退到更早版本，删完则无法从该实验续训；正在使用或被初始化配置引用的模型会被拒绝。训练经验保留。</p>
+            <p id="checkpoint-storage-hint" class="muted">点击刷新读取保存点。</p>
+            <div class="table-scroll"><table><thead><tr><th>实验 / 版本</th><th>类别</th><th>保存步</th><th>状态 / 引用</th><th>操作</th></tr></thead><tbody id="checkpoint-body"></tbody></table></div>
+            <h3>checkpoint 回收站</h3>
+            <p class="muted">移入回收站不释放磁盘。永久删除不可恢复；命名版本与原模型有硬链接时，其他引用仍会保留数据。</p>
+            <div class="table-scroll"><table><thead><tr><th>删除时间</th><th>实验 / 对象</th><th>操作</th></tr></thead><tbody id="checkpoint-trash-body"></tbody></table></div>
+          </article>
         </section>
         <section id="view-settings" class="view" hidden>
           <div class="settings-grid">

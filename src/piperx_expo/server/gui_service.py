@@ -284,6 +284,23 @@ class ServiceManager:
                     time.sleep(0.1)
             return self.status()
 
+    def manage_storage(self, action, *, source_id=None, item_id=None, trash_id=None, confirmation=None):
+        from piperx_expo.server.storage import CheckpointStorage
+
+        with self.lock():
+            storage = CheckpointStorage(self)
+            if action == "trash-checkpoint":
+                result = storage.delete(source_id, item_id, confirmation == "confirmed")
+            elif action == "restore-checkpoint":
+                result = storage.restore(source_id, trash_id)
+            elif action == "purge-checkpoint":
+                result = storage.purge(source_id, trash_id, confirmation)
+            elif action == "storage":
+                result = None
+            else:
+                raise ValueError("未知checkpoint管理操作")
+            return {**self.status(), "storage": storage.catalog(), "storage_result": result}
+
     def worker(self, job_id):
         folder = self.runtime / job_id
         # 组信号由子进程接收，监督进程保留到退出码写完；SIGKILL兜底时不会声称完整保存。
@@ -317,7 +334,8 @@ class ServiceManager:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", nargs="?", choices=("start", "stop", "status"))
+    parser.add_argument("action", nargs="?", choices=("start", "stop", "status", "storage",
+                                                     "trash-checkpoint", "restore-checkpoint", "purge-checkpoint"))
     parser.add_argument("--config", default="configs/server/rotating_square.gui.yaml")
     parser.add_argument("--worker")
     parser.add_argument("--resume-run")
@@ -325,6 +343,10 @@ def main():
     parser.add_argument("--total-steps", type=int)
     parser.add_argument("--mode", choices=("train", "eval"), default="train")
     parser.add_argument("--model-folder", help="只推理时使用已登记的固定RL版本；不从HTTP接受任意目录")
+    parser.add_argument("--source-id")
+    parser.add_argument("--item-id")
+    parser.add_argument("--trash-id")
+    parser.add_argument("--confirmation")
     parser.add_argument("--mock", action="store_true", help="仅命令行管理链路验收；不训练、不连接机器人")
     args = parser.parse_args()
     manager = ServiceManager()
@@ -332,10 +354,14 @@ def main():
         manager.worker(args.worker)
         return
     try:
-        result = manager.start(args.config, mock=args.mock, resume_run=args.resume_run,
+        if args.action in {"storage", "trash-checkpoint", "restore-checkpoint", "purge-checkpoint"}:
+            result = manager.manage_storage(args.action, source_id=args.source_id, item_id=args.item_id,
+                                            trash_id=args.trash_id, confirmation=args.confirmation)
+        else:
+            result = manager.start(args.config, mock=args.mock, resume_run=args.resume_run,
                                additional_steps=args.additional_steps, total_steps=args.total_steps,
                                mode=args.mode, model_folder=args.model_folder) if args.action == "start" else (
-            manager.stop() if args.action == "stop" else manager.status())
+                manager.stop() if args.action == "stop" else manager.status())
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:
         print(json.dumps({"phase": "error", "error": str(error)}, ensure_ascii=False))

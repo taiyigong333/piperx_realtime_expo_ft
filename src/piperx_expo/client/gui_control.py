@@ -19,6 +19,7 @@ from piperx_expo.client.remote_server import RemoteServer
 from piperx_expo.client.safety import validate_client_config
 from piperx_expo.review import PROTOCOL, observation_state, resolve_review
 from piperx_expo.observation import IMAGE_KEYS, make_observation
+from piperx_expo.trash import RecycleBin
 
 
 class FinishRequested(Exception):
@@ -31,6 +32,7 @@ class GUIController:
         self.config.setdefault("admission_mode", "manual")
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.recycle = RecycleBin(self.root, r"[0-9a-f]{32}")
         self.allow_motion = allow_motion
         self.condition = threading.Condition(threading.RLock())
         self.stop_event = threading.Event()
@@ -620,7 +622,39 @@ class GUIController:
             self.condition.notify_all()
 
     def command(self, action, values):
-        if action == "prepare":
+        if action in {"delete_episode", "restore_episode", "purge_episode"}:
+            with self.condition:
+                if ((self.worker and self.worker.is_alive())
+                        or (self.prepare_worker and self.prepare_worker.is_alive())
+                        or (self.arm_hold and self.arm_hold.snapshot().get("running"))):
+                    raise ValueError("先结束当前会话，再删除或恢复本地轨迹")
+                if action == "delete_episode":
+                    if set(values) != {"episode_id", "confirmed"} or values["confirmed"] is not True:
+                        raise ValueError("删除轨迹前必须确认完整轨迹ID")
+                    folder = self.recycle.child(values["episode_id"])
+                    meta = json.loads((folder / "metadata.json").read_text())
+                    if meta["status"] in {"recording", "review_pending", "submitted", "queued"}:
+                        raise ValueError("轨迹尚在录制、待审核或待整批处理，不能删除")
+                    self.recycle.put([values["episode_id"]], {"kind": "episode", "steps": meta["steps"],
+                                                             "status": meta["status"]})
+                    if self.recorder and self.recorder.id == values["episode_id"]:
+                        self.recorder = None
+                elif action == "restore_episode":
+                    self.recycle.restore(values["trash_id"])
+                else:
+                    self.recycle.purge(values["trash_id"], values.get("confirmation"))
+        elif action in {"checkpoint_refresh", "checkpoint_delete", "checkpoint_restore", "checkpoint_purge"}:
+            with self.condition:
+                if not self.remote_server:
+                    raise ValueError("此配置未启用远程checkpoint管理")
+                if action != "checkpoint_refresh" and ((self.worker and self.worker.is_alive())
+                        or (self.prepare_worker and self.prepare_worker.is_alive())
+                        or (self.arm_hold and self.arm_hold.snapshot().get("running"))):
+                    raise ValueError("先结束当前会话，再管理checkpoint")
+                remote_action = {"checkpoint_refresh": "storage", "checkpoint_delete": "trash-checkpoint",
+                                 "checkpoint_restore": "restore-checkpoint", "checkpoint_purge": "purge-checkpoint"}[action]
+                self.remote_server.request(remote_action, **values)
+        elif action == "prepare":
             self.prepare(values)
         elif action in {"server_start", "server_stop", "server_status"}:
             if not self.remote_server:

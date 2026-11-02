@@ -1099,3 +1099,10 @@ footer > span:first-child {
 .training-budget progress { flex-basis: 100%; width: 100%; height: 9px; accent-color: #299886; }
 .advanced-training { margin: 12px 0; }
 .advanced-training .action-buttons { margin-top: 10px; flex-wrap: wrap; }
+
+/* 管理表格沿用现有卡片；危险操作与回放保持足够间距，长版本名允许换行。 */
+.storage-card { margin-top: 20px; padding: 20px; }
+.storage-card .muted { line-height: 1.6; overflow-wrap: anywhere; }
+.storage-card td { overflow-wrap: anywhere; }
+.storage-card .text-button, #history-body .text-button, #recent-body .text-button { margin-right: 12px; }
+.delete-action { color: #b34d45; }
