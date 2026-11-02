@@ -325,7 +325,8 @@ function render(s) {
   const ep = s.episode,
     phase = s.phase;
   const remote = s.remote_server || { enabled: false };
-  const evaluation = s.session_mode === "eval" || (remote.running && remote.mode === "eval");
+  const evaluation = remote.running ? remote.mode === "eval"
+    : s.can_start ? $("session-mode").value === "eval" : s.session_mode === "eval";
   const hold = s.arm_hold || {};
   const armBusy = hold.running && !["enable_sent", "enabled", "holding", "homed"].includes(hold.phase);
   for (const id of ["recover-enable", "hold-position", "home-arm"]) {
@@ -384,15 +385,17 @@ function render(s) {
       !["homing", "running", "archiving", "review_pending", "submitted", "waiting_server", "awaiting_reset", "finishing"].includes(phase);
     $("finish-training").textContent = evaluation ? (s.finish_requested ? "已申请结束推理" : "结束推理") : s.finish_requested ? "已申请结束采集并训练" : "结束采集并训练";
     const overall = s.training_progress || {};
-    const completed = overall.completed_steps ?? remote.completed_steps ?? 0;
-    const total = overall.total_steps ?? remote.total_steps;
-    const saved = overall.checkpoint_step ?? training.checkpoint_step ?? remote.evaluation_source?.step ?? remote.resume_step;
+    const chosen = remote.runs?.find(run => run.id === selector.value);
+    const previewEval = selectingEval && s.can_start && !remote.running;
+    const completed = previewEval ? 0 : overall.completed_steps ?? remote.completed_steps ?? 0;
+    const total = previewEval ? Number($("resume-budget").value) : overall.total_steps ?? remote.total_steps;
+    const saved = previewEval ? chosen?.step : overall.checkpoint_step ?? training.checkpoint_step ?? remote.evaluation_source?.step ?? remote.resume_step;
     $("training-completed").textContent = completed;
     $("training-total").textContent = total ?? "—";
     $("training-saved").textContent = saved == null ? "尚无保存点" : `第${saved}步`;
     $("training-progress").max = total || 1;
     $("training-progress").value = completed;
-    const chosen = remote.runs?.find(run => run.id === selector.value);
+    $("checkpoint-caption").textContent = evaluation ? "读取模型：" : "最近保存：";
     $("resume-hint").textContent = selectingEval
       ? (chosen ? `固定读取第${chosen.step}步完整模型，不更新、不覆盖权重。来源：${chosen.checkpoint_dir || chosen.run_name}` : "请选择已有模型；推理步数从0重新计，不要求大于模型保存步数。")
       : selector.value
@@ -400,8 +403,8 @@ function render(s) {
       : "可从列表选择历史实验。未保存模型checkpoint的实验不能恢复；停止不会额外强制保存。";
     $("server-start").disabled = remote.busy || remote.running;
     $("server-stop").disabled = remote.phase === "idle" && !remote.busy;
-    $("server-hint").textContent = remote.error || training.error || (remote.mode === "eval"
-      ? "只推理模式：完整模型只读恢复，结果另存评估目录，每条仍需人工确认归位、张开夹爪。"
+    $("server-hint").textContent = remote.error || training.error || (evaluation
+      ? "只推理模式：准备时完整模型只读恢复，结果另存评估目录，每条仍需人工确认归位、张开夹爪。"
       : remote.mock
       ? "当前为管理链路模拟服务，不加载模型、不训练。"
       : "点击准备训练后自动启动、连接并预热。准备完成后等待你确认归位并开始，不会自动运动。");
@@ -565,6 +568,7 @@ function render(s) {
     ],
   };
   if (evaluation) {
+    prompts.idle = ["先准备保存模型，再决定何时推理", "选择已保存模型和本轮动作预算，准备只加载/预热，不训练；之后每条仍由你确认开始。"];
     prompts.waiting_server = ["推理结果已记录", "本模式不训练、不保存新权重；继续下一条仍由你确认开始。"];
     prompts.completed = ["本轮推理已结束", "原模型未修改；结果保存在独立评估目录。"];
   }
