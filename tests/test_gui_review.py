@@ -14,6 +14,7 @@ from piperx_expo.client.rpc import Dispatcher
 from piperx_expo.config import ROOT, load_config
 from piperx_expo.review import PROTOCOL, commit_episode, resolve_review
 from piperx_expo.server.review_loop import collect_episode, persist_reviewed, restore_reviewed
+from piperx_expo.server.session_control import complete_episode
 
 
 def wait_for(predicate, timeout=5):
@@ -88,15 +89,15 @@ def test_cli_remains_separate(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "admission_mode,manual,admitted",
+    "admission_mode,manual,admitted,finish",
     [
-        ("manual", True, True),
-        ("manual", False, True),
-        ("manual", True, False),
-        ("auto", None, True),
+        ("manual", True, True, True),
+        ("manual", False, True, False),
+        ("manual", True, False, False),
+        ("auto", None, True, True),
     ],
 )
-def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode, manual, admitted):
+def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode, manual, admitted, finish):
     # 使用真实msgpack/WebSocket往返和原EnvClient，但不用模型/GPU或机器人。
     import sys
 
@@ -130,6 +131,8 @@ def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode,
             assert controller.recorder is None and controller.phase == "warming"
             assert controller.env.steps == 0 and not controller.env.armed
             learner._call_operation("policy_status", {"env_id": env.env_id, "details": {"stage": "ready"}})
+            learner._call_operation("episode_context", {"env_id": env.env_id,
+                                                       "start_step": 10, "total_steps": 20})
             result, _ = collect_episode(env, Sampler(), None, 8, 1000, 3)
             review, transitions = result["review"], result["transitions"]
             prepared = commit_episode(processor, transitions, review)
@@ -142,6 +145,18 @@ def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode,
                     "outcome": "accepted" if admitted else "rejected",
                 },
             )
+            if finish and admission_mode == "auto":
+                controller.command("finish_training", {})
+            saved = []
+            ending, checkpoint = complete_episode(
+                env, step=13, total_steps=20, update_count=0, accepted_episodes=int(admitted),
+                last_checkpoint=10, should_save=True, save_checkpoint=lambda: saved.append(13),
+            )
+            assert ending is finish and checkpoint == 13 and saved == [13]
+            learner._call_operation("session_complete", {"env_id": env.env_id, "progress": {
+                "completed_steps": 13, "total_steps": 20, "checkpoint_step": 13,
+                "update_count": 0, "accepted_episodes": int(admitted),
+            }})
             results.append(result)
         except BaseException as error:
             errors.append(error)
@@ -155,11 +170,17 @@ def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode,
         if admission_mode == "manual":
             wait_for(lambda: controller.phase == "review_pending")
             assert processor.transitions == []  # 复核前不入池。
+            if finish:
+                controller.command("finish_training", {})
+                assert controller.phase == "review_pending" and processor.transitions == []
             controller.submit(manual, admitted)
         thread.join(5)
         assert not thread.is_alive() and not errors, errors
         assert results
         assert controller.recorder.meta["status"] == ("accepted" if admitted else "rejected")
+        overall = controller.state()["training_progress"]
+        assert overall["completed_steps"] == 13 and overall["total_steps"] == 20
+        assert overall["checkpoint_step"] == 13 and controller.phase == "completed"
         if admitted:
             effective = bool(manual) if manual is not None else False
             assert processor.starts == 1 and processor.successes == [effective]
@@ -296,11 +317,11 @@ def test_invalid_home_start_can_retry_without_restarting_learner(tmp_path):
     worker.start()
     try:
         wait_for(lambda: controller.phase == "awaiting_reset")
-        controller.command("ready", {})
+        controller.command("ready", {"motion_confirmed": True})
         wait_for(lambda: bool(controller.error) and controller.phase == "awaiting_reset")
         assert not controller.stop_event.is_set() and worker.is_alive()
         assert "X=-0.080000m" in controller.state()["error"]
-        controller.command("ready", {})
+        controller.command("ready", {"motion_confirmed": True})
         worker.join(2)
         assert not worker.is_alive() and not errors
         assert len(attempts) == 2 and controller.phase == "homing" and not controller.error

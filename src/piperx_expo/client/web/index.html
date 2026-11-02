@@ -58,29 +58,49 @@
               <span>4090 训练服务器 <span id="server-phase" class="badge">读取状态</span></span>
               <div class="action-buttons">
                 <button id="server-refresh" class="text-button">刷新状态</button>
-                <button id="server-start" class="button primary">启动服务器 RL</button>
-                <button id="server-stop" class="button danger-outline">停止服务器 RL</button>
+                <button id="prepare" class="button primary">准备训练</button>
+                <button id="finish-training" class="button secondary" disabled>本条保存后停止</button>
               </div>
             </div>
             <div class="server-training-options">
               <label for="server-training">训练方式</label>
               <select id="server-training"><option value="">新建训练</option></select>
-              <label id="resume-budget-label" hidden>续训追加动作步数
-                <input id="resume-budget" type="number" min="1" max="10000000" value="4000" />
+              <label id="resume-budget-label">训练总步数
+                <input id="resume-budget" type="number" min="1" max="10000000" placeholder="读取配置中" />
               </label>
               <p id="resume-hint"></p>
             </div>
-            <p id="server-hint">从机器人电脑管理服务器，每次启动创建独立训练记录。</p>
+            <p id="server-hint">准备训练只加载、连接和预热；每条归位与采集由你确认开始。</p>
+            <div class="training-budget" aria-live="polite">
+              <strong>已进行 <span id="training-completed">0</span> / 总 <span id="training-total">—</span> 步</strong>
+              <span>最近保存：<b id="training-saved">尚无保存点</b></span>
+              <progress id="training-progress" max="1" value="0" aria-label="训练累计步数"></progress>
+            </div>
+            <details class="advanced-training"><summary>高级分步操作</summary>
+              <div class="action-buttons">
+                <button id="server-start" class="button secondary">仅启动服务器</button>
+                <button id="connect-advanced" class="button secondary">仅连接学习器</button>
+                <button id="server-stop" class="button danger-outline">立即结束训练服务</button>
+              </div>
+              <p>正常收尾使用“本条保存后停止”；突发情况使用顶部急停。立即结束会中断当前会话。</p>
+            </details>
             <div id="server-run" class="mono"></div>
             <details><summary>服务器日志</summary><pre id="server-log">暂无日志</pre></details>
           </article>
+          <ol class="workflow-steps" aria-label="训练流程">
+            <li data-workflow="prepare">1 · 准备模型</li>
+            <li data-workflow="ready">2 · 人工确认开始</li>
+            <li data-workflow="collect">3 · 归位与采集</li>
+            <li data-workflow="review">4 · 判定与人工审核</li>
+            <li data-workflow="save">5 · 更新与保存</li>
+          </ol>
           <div class="session-strip">
             <div>
               <span class="label">当前阶段</span
               ><strong id="phase">准备就绪</strong>
             </div>
             <div>
-              <span class="label">轨迹步数</span
+              <span class="label">本条步数</span
               ><strong
                 ><span id="steps">0</span
                 ><span class="muted">
@@ -203,7 +223,7 @@
                 <div class="divider"></div>
                 <form id="review-form">
                   <fieldset id="review-fields" disabled>
-                    <legend>最终结果 <span>人工标记优先</span></legend>
+                    <legend>最终结果 <span>系统判定＋人工审核，人工优先</span></legend>
                     <div class="segmented">
                       <label
                         ><input
@@ -211,7 +231,7 @@
                           name="manual"
                           value="auto"
                           checked
-                        /><span>自动</span></label
+                        /><span>沿用系统</span></label
                       ><label
                         ><input
                           type="radio"

@@ -125,10 +125,19 @@ class ServiceManager:
             result.append(item)
         return result[:100]
 
+    def _budget(self, record=None):
+        path = Path(record["config"]) if record else self.root / "configs/server/rotating_square.gui.yaml"
+        try:
+            config = yaml.safe_load(path.read_text())
+            return int(config["max_steps"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def status(self):
         path, record = self.record()
         if record is None:
-            return {"phase": "idle", "running": False, "log_tail": "", "runs": self.runs()}
+            return {"phase": "idle", "running": False, "log_tail": "", "runs": self.runs(),
+                    "total_steps": self._budget(), "completed_steps": 0}
         running = owned(record)
         stopping = (path.parent / "stop_requested").exists()
         if running:
@@ -147,10 +156,15 @@ class ServiceManager:
         except (OSError, ValueError):
             pass
         return {**record, "phase": phase, "running": running, "log_tail": tail,
-                "training": progress, "runs": self.runs()}
+                "training": progress, "runs": self.runs(), "total_steps": self._budget(record),
+                "completed_steps": progress.get("env_step", record.get("resume_step") or 0)}
 
-    def start(self, config_path, *, mock=False, resume_run=None, additional_steps=None):
+    def start(self, config_path, *, mock=False, resume_run=None, additional_steps=None, total_steps=None):
         with self.lock():
+            if total_steps is not None and (type(total_steps) is not int or not 1 <= total_steps <= 10_000_000):
+                raise ValueError("训练总步数必须为1到10000000整数")
+            if total_steps is not None and additional_steps is not None:
+                raise ValueError("总步数和追加步数不能同时设置")
             if additional_steps is not None and (
                 resume_run is None or type(additional_steps) is not int or not 1 <= additional_steps <= 10_000_000
             ):
@@ -161,6 +175,8 @@ class ServiceManager:
             if current["running"]:
                 if resume_run is not None or additional_steps is not None:
                     raise RuntimeError("请先停止当前训练，再选择续训实验")
+                if total_steps is not None and total_steps != current.get("total_steps"):
+                    raise RuntimeError("现有训练总预算不同，请先停止再修改")
                 if current.get("mock") != mock:
                     raise RuntimeError("已有另一运行模式的GUI服务，请先停止")
                 return current
@@ -172,8 +188,12 @@ class ServiceManager:
                 if additional_steps is not None:
                     # 只扩展采集预算；模型、数据、资产、run_name沿用原实验快照。
                     config["max_steps"] = max(config["max_steps"], resume_step + additional_steps)
+                if total_steps is not None:
+                    config["max_steps"] = total_steps
                 if config["max_steps"] <= resume_step:
-                    raise ValueError("原动作预算已完成，请填写续训追加步数")
+                    raise ValueError("训练总步数必须大于checkpoint保存步数，或填写续训追加步数")
+            if total_steps is not None:
+                config["max_steps"] = total_steps
             if config.get("episode_review") is not True:
                 raise ValueError("仅允许启动GUI专用复核RL配置")
             if listening(config["port"]):
@@ -198,7 +218,7 @@ class ServiceManager:
             record = {"id": job_id, "run_name": config["run_name"], "port": config["port"],
                       "config": str(snapshot), "source_config": str(source), "mock": mock,
                       "log": str(folder / "server.log"), "started_at": time.time(),
-                      "resume_run": resume_run, "resume_step": resume_step}
+                      "resume_run": resume_run, "resume_step": resume_step, "total_steps": config.get("max_steps")}
             write_json(folder / "process.json", record)
             # 管理器是独立进程组的组长；即使SSH断开，也能继续记录退出码并管理整棵进程树。
             with Path(record["log"]).open("ab") as output:
@@ -272,6 +292,7 @@ def main():
     parser.add_argument("--worker")
     parser.add_argument("--resume-run")
     parser.add_argument("--additional-steps", type=int)
+    parser.add_argument("--total-steps", type=int)
     parser.add_argument("--mock", action="store_true", help="仅命令行管理链路验收；不训练、不连接机器人")
     args = parser.parse_args()
     manager = ServiceManager()
@@ -280,7 +301,7 @@ def main():
         return
     try:
         result = manager.start(args.config, mock=args.mock, resume_run=args.resume_run,
-                               additional_steps=args.additional_steps) if args.action == "start" else (
+                               additional_steps=args.additional_steps, total_steps=args.total_steps) if args.action == "start" else (
             manager.stop() if args.action == "stop" else manager.status())
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:

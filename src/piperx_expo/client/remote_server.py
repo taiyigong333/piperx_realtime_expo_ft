@@ -37,14 +37,22 @@ class RemoteServer:
         if action not in {"start", "stop", "status"}:
             raise ValueError("未知服务器操作")
         if values:
-            if action != "start" or set(values) - {"resume_run", "additional_steps"}:
+            if action != "start" or set(values) - {"resume_run", "additional_steps", "total_steps"}:
                 raise ValueError("不允许覆盖服务器启动参数")
-            if not re.fullmatch(r"[0-9a-f]{32}", str(values.get("resume_run", ""))):
+            if "resume_run" in values and not re.fullmatch(r"[0-9a-f]{32}", str(values["resume_run"])):
                 raise ValueError("续训实验ID无效")
             if "additional_steps" in values and (
                 type(values["additional_steps"]) is not int or not 1 <= values["additional_steps"] <= 10_000_000
             ):
                 raise ValueError("续训追加步数无效")
+            if "additional_steps" in values and "resume_run" not in values:
+                raise ValueError("追加步数必须选择历史实验")
+            if "total_steps" in values and (
+                type(values["total_steps"]) is not int or not 1 <= values["total_steps"] <= 10_000_000
+            ):
+                raise ValueError("训练总步数无效")
+            if "total_steps" in values and "additional_steps" in values:
+                raise ValueError("总步数与追加步数不能同时设置")
         with self.lock:
             if action in self.pending:
                 return
@@ -57,9 +65,12 @@ class RemoteServer:
                    '"$HOME/.local/bin/uv" run --locked python -m piperx_expo.server.gui_service '
                    f"{action} --config {shlex.quote(self.config['config'])}")
         if values:
-            command += f" --resume-run {shlex.quote(values['resume_run'])}"
+            if "resume_run" in values:
+                command += f" --resume-run {shlex.quote(values['resume_run'])}"
             if "additional_steps" in values:
                 command += f" --additional-steps {int(values['additional_steps'])}"
+            if "total_steps" in values:
+                command += f" --total-steps {int(values['total_steps'])}"
         result = subprocess.run(
             ["ssh", "-oBatchMode=yes", "-oConnectTimeout=5", "-oServerAliveInterval=5",
              "-oServerAliveCountMax=2", self.config["ssh_host"], command],

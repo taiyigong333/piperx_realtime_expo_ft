@@ -11,6 +11,7 @@ import numpy as np
 
 from piperx_expo.client.recording import write_json
 from piperx_expo.review import EpisodeDigest, commit_episode, resolve_review
+from piperx_expo.server.session_control import reset_reviewed_episode
 
 
 def collect_episode(env, sampler, agent, replan_steps, control_hz, remaining_steps, *, on_stage=None):
@@ -18,7 +19,7 @@ def collect_episode(env, sampler, agent, replan_steps, control_hz, remaining_ste
         raise ValueError("采集预算已耗尽")
     on_stage = on_stage or (lambda *_: None)
     on_stage("awaiting_reset")
-    obs = env.reset()
+    obs = reset_reviewed_episode(env)
     on_stage("collecting")
     digest = EpisodeDigest()
     digest.observation(obs)

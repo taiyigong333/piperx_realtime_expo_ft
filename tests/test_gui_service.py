@@ -261,3 +261,25 @@ def test_stopped_remote_does_not_allow_infinite_connection_wait(tmp_path):
     finally:
         controller.remote_server = None
         controller.stop()
+
+
+def test_resume_total_budget_is_absolute_and_must_exceed_saved_step(tmp_path, monkeypatch):
+    import piperx_expo.server.gui_service as service_module
+
+    manager, job_id, _ = saved_run(tmp_path)
+    monkeypatch.setattr(manager, "status", lambda: {"running": False})
+    config_path = tmp_path / "current.yaml"
+    config_path.write_text("run_name: ignored\n")
+    with pytest.raises(ValueError, match="大于checkpoint"):
+        manager.start(str(config_path), resume_run=job_id, total_steps=80)
+    with pytest.raises(ValueError, match="不能同时"):
+        manager.start(str(config_path), resume_run=job_id, total_steps=200, additional_steps=20)
+    monkeypatch.setattr(service_module, "listening", lambda _: False)
+    monkeypatch.setattr(service_module, "process_ticks", lambda _: "1")
+    monkeypatch.setattr("piperx_expo.server.launch.validate", lambda *_: None)
+    monkeypatch.setattr(service_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=""))
+    monkeypatch.setattr(service_module.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(pid=999))
+    manager.start(str(config_path), resume_run=job_id, total_steps=200)
+    _, record = manager.record()
+    assert yaml.safe_load(Path(record["config"]).read_text())["max_steps"] == 200
+    assert record["resume_step"] == 80 and record["total_steps"] == 200

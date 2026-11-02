@@ -41,6 +41,7 @@ from piperx_expo.review import PROTOCOL, commit_episode
 from piperx_expo.server.review_loop import collect_episode, persist_reviewed, restore_reviewed
 from piperx_expo.server.policy_warmup import warmup_policy
 from piperx_expo.server.progress import TrainingProgress
+from piperx_expo.server.session_control import StopAfterEpisode, complete_episode
 from piperx_expo.config import load_config
 
 
@@ -272,7 +273,8 @@ def main(_):
         and json.loads(p.read_text())["end_step"] <= start_step
     )
     combine_rng = jax.random.PRNGKey(FLAGS.seed + 100)
-    step, credit, last_checkpoint, update_count = start_step, 0, start_step, 0
+    step, credit, last_checkpoint, update_count = start_step, 0, start_step if resuming else None, 0
+    finish_requested = False
     if resuming:
         state_file = Path(checkpoint_dir) / f"review_state_{start_step}.json"
         if not state_file.is_file():
@@ -280,8 +282,9 @@ def main(_):
         state = json.loads(state_file.read_text())
         credit, update_count = state["credit"], state["update_count"]
 
-    progress.update("ready", env_step=start_step, accepted_episodes=accepted_episodes,
-                    update_count=update_count)
+    progress.update("ready", env_step=start_step, total_steps=FLAGS.max_steps,
+                    accepted_episodes=accepted_episodes, update_count=update_count,
+                    checkpoint_step=last_checkpoint)
 
     def save_training_checkpoint():
         # 先写同step辅助状态，再提交模型；多出的辅助文件不会被当作模型checkpoint。
@@ -296,10 +299,18 @@ def main(_):
 
     try:
         while step < FLAGS.max_steps:
-            result, agent = collect_episode(
-                env, sampler, agent, FLAGS.replan_steps, FLAGS.config_task.control_hz, FLAGS.max_steps - step,
-                on_stage=progress.update,
-            )
+            env.client._call_operation("episode_context", {
+                "env_id": env.env_id, "start_step": step, "total_steps": FLAGS.max_steps,
+            })
+            try:
+                result, agent = collect_episode(
+                    env, sampler, agent, FLAGS.replan_steps, FLAGS.config_task.control_hz, FLAGS.max_steps - step,
+                    on_stage=progress.update,
+                )
+            except StopAfterEpisode:
+                # 已完成上一回合保存，用户在等待下一次人工开始时申请正常结束。
+                finish_requested = True
+                break
             transitions, review = result["transitions"], result["review"]
             start = step
             step += len(transitions)
@@ -357,17 +368,28 @@ def main(_):
                 review["success"],
                 update_count,
             )
-            if (
-                FLAGS.checkpoint_model
-                and FLAGS.checkpoint_interval > 0
-                and step - last_checkpoint >= FLAGS.checkpoint_interval
-            ):
-                save_training_checkpoint()
-                last_checkpoint = step
-        if FLAGS.checkpoint_model and step != last_checkpoint:
+            finish_requested, last_checkpoint = complete_episode(
+                env, step=step, total_steps=FLAGS.max_steps, update_count=update_count,
+                accepted_episodes=accepted_episodes, last_checkpoint=last_checkpoint,
+                should_save=(FLAGS.checkpoint_model and FLAGS.checkpoint_interval > 0
+                             and step - (last_checkpoint or 0) >= FLAGS.checkpoint_interval),
+                save_checkpoint=save_training_checkpoint,
+            )
+            if finish_requested:
+                break
+        if (FLAGS.checkpoint_model or finish_requested) and step != last_checkpoint:
             save_training_checkpoint()
-        progress.update("completed", env_step=step, update_count=update_count)
-        env.client._call_operation("session_complete", {"env_id": env.env_id})
+            last_checkpoint = step
+        progress.update("completed", env_step=step, total_steps=FLAGS.max_steps,
+                        update_count=update_count, checkpoint_step=last_checkpoint,
+                        stop_reason="operator_saved_stop" if finish_requested else "budget_complete")
+        env.client._call_operation("session_complete", {
+            "env_id": env.env_id, "progress": {
+                "completed_steps": step, "total_steps": FLAGS.max_steps,
+                "checkpoint_step": last_checkpoint, "update_count": update_count,
+                "stop_reason": "operator_saved_stop" if finish_requested else "budget_complete",
+            },
+        })
     except BaseException as error:
         progress.update("failed", error=str(error))
         # 先输出根因再收尾，避免上传等待或二次中断掩盖最初的客户端错误。

@@ -21,6 +21,10 @@ from piperx_expo.review import PROTOCOL, observation_state, resolve_review
 from piperx_expo.observation import IMAGE_KEYS, make_observation
 
 
+class FinishRequested(Exception):
+    """回合边界的正常停止信号；不作为设备故障处理。"""
+
+
 class GUIController:
     def __init__(self, config, root, allow_motion=False):
         self.config = copy.deepcopy(config)
@@ -38,6 +42,11 @@ class GUIController:
         self.recorder = None
         self.connection = None
         self.worker = None
+        self.prepare_worker = None
+        self.preparation_cancel = threading.Event()
+        self.finish_requested = False
+        self.training_progress = {}
+        self.episode_start_step = 0
         self.latest_obs = None
         self.pending_action = None
         self.policy_status = {}
@@ -95,6 +104,8 @@ class GUIController:
         self.shutdown_event.set()
         try:
             self.stop()
+            if self.prepare_worker:
+                self.prepare_worker.join(timeout=5)
             if self.worker:
                 self.worker.join(timeout=5)
         finally:
@@ -137,6 +148,8 @@ class GUIController:
             return {
                 "arm_hold": self.arm_hold.snapshot() if self.arm_hold else {"running": False, "phase": "idle"},
                 "policy_status": copy.deepcopy(self.policy_status),
+                "training_progress": copy.deepcopy(self.training_progress),
+                "finish_requested": self.finish_requested,
                 "camera_ready": camera_ok,
                 "stop_status": getattr(self.env.device, "stop_result", "") if self.env else "",
                 "camera_error": self.camera_error,
@@ -159,7 +172,8 @@ class GUIController:
                 "detector": self.config.get("success_detector_config"),
                 "episode": meta,
                 "connected": self.connection is not None,
-                "can_start": self.worker is None or not self.worker.is_alive(),
+                "can_start": (self.worker is None or not self.worker.is_alive()) and
+                             (self.prepare_worker is None or not self.prepare_worker.is_alive()),
                 "state": observation_state(self.latest_obs).tolist() if self.latest_obs else None,
                 "remote_server": self.remote_server.snapshot() if self.remote_server else {"enabled": False},
             }
@@ -192,7 +206,67 @@ class GUIController:
                 raise ValueError("连接地址只能在会话启动前修改")
             self.config.update(values)
 
-    def start(self, demo=False, motion_confirmed=False):
+    def prepare(self, values):
+        """合并启动和连接；只准备模型，归位/策略仍等待单独的ready。"""
+        if not self.remote_server:
+            raise ValueError("此配置未启用远程训练；模拟体验或高级连接入口仍可使用")
+        if set(values) - {"resume_run", "total_steps"}:
+            raise ValueError("准备训练仅接受历史实验和训练总步数")
+        if "total_steps" in values and (type(values["total_steps"]) is not int
+                                        or not 1 <= values["total_steps"] <= 10_000_000):
+            raise ValueError("训练总步数必须为1到10000000整数")
+        with self.condition:
+            if ((self.worker and self.worker.is_alive())
+                    or (self.prepare_worker and self.prepare_worker.is_alive())):
+                raise ValueError("当前会话尚未结束，请等待完成或停止")
+            remote = self.remote_server.snapshot()
+            if remote.get("stopping") or remote.get("phase") == "stopping":
+                raise ValueError("上一训练仍在停止，请等待退出后再准备")
+            if remote.get("running"):
+                if remote.get("training", {}).get("stage") == "completed":
+                    raise ValueError("上一训练正在收尾，请等待退出")
+                if values.get("resume_run"):
+                    raise ValueError("已有训练运行；连接当前实验前请清空历史实验选择")
+                if values.get("total_steps") not in (None, remote.get("total_steps")):
+                    raise ValueError("已有训练总预算不同，请先结束当前实验再修改")
+            else:
+                self.remote_server.request("start", **values)
+            self.preparation_cancel.clear()
+            self.finish_requested = False
+            self.training_progress = {}
+            self.error = ""
+            self.phase = "preparing"
+            self.prepare_worker = threading.Thread(target=self._prepare_and_connect, daemon=True)
+            self.prepare_worker.start()
+
+    def _prepare_and_connect(self):
+        try:
+            deadline = time.monotonic() + self.config.get("prepare_timeout_s", 60)
+            while not self.preparation_cancel.is_set():
+                remote = self.remote_server.snapshot()
+                if not remote.get("busy"):
+                    if remote.get("error"):
+                        raise RuntimeError(remote["error"])
+                    if remote.get("running"):
+                        with self.condition:
+                            if self.preparation_cancel.is_set():
+                                return
+                            self.training_progress = {
+                                "total_steps": remote.get("total_steps"),
+                                "completed_steps": remote.get("completed_steps", remote.get("resume_step") or 0),
+                            }
+                            self.start(prepare_only=True)
+                        return
+                    if remote.get("phase") in {"failed", "stopped", "completed"}:
+                        raise RuntimeError("学习器启动后已退出，请检查服务器日志")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("训练启动管理超时，请检查服务器连接与状态")
+                self.preparation_cancel.wait(0.1)
+        except Exception as error:
+            if not self.preparation_cancel.is_set():
+                self.stop(str(error))
+
+    def start(self, demo=False, motion_confirmed=False, *, prepare_only=False):
         if self.stop_event.is_set():
             # 旧看门狗线程必须先退出，才能清除停止事件并创建全新硬件会话。
             self.heartbeat_thread.join(timeout=1)
@@ -207,7 +281,7 @@ class GUIController:
                 raise ValueError("上一会话尚未退出，请等待停止完成")
             if demo and self.config["backend"] != "mock":
                 raise ValueError("模拟演示只支持mock配置")
-            if self.config["backend"] == "piperx" and not (self.allow_motion and motion_confirmed):
+            if self.config["backend"] == "piperx" and not (self.allow_motion and (motion_confirmed or prepare_only)):
                 raise ValueError("真机需要启动参数--allow-motion，并勾选现场运动确认")
             if self.stop_event.is_set():
                 if self.heartbeat_thread.is_alive():
@@ -215,7 +289,9 @@ class GUIController:
                 self.stop_event.clear()
                 self.error = ""
                 self.env = self.connection = self.recorder = self.latest_obs = self.pending_action = None
-                self.ready = self.end_requested = False
+                self.ready = self.end_requested = self.finish_requested = False
+                if not prepare_only:
+                    self.training_progress = {}
                 self.policy_status = {}
                 self.decision = None
                 self.last_heartbeat = time.monotonic()
@@ -291,7 +367,9 @@ class GUIController:
             with self.condition:
                 self.ready = False
                 self.phase = "awaiting_reset"
-            self._wait(lambda: self.ready)
+            self._wait(lambda: self.ready or self.finish_requested)
+            if self.finish_requested:
+                raise FinishRequested()
             if self.config["backend"] == "piperx":
                 try:
                     # 起点不合法时只读拒绝，保留RPC等待；不让学习器退出并重新加载模型。
@@ -360,7 +438,11 @@ class GUIController:
                 "demo_reviewed",
             }:
                 raise RuntimeError("上条轨迹尚未收到服务器确认，禁止启动下一条")
-            observation = self.env.reset()
+            try:
+                observation = self.env.reset()
+            except FinishRequested:
+                self.phase = "finishing"
+                return {"status": "success", "stop_after_episode": True}
             with self.condition:
                 self.env.config["episode_steps"] = self.config["episode_steps"]
                 self.env.config["admission_mode"] = self.config["admission_mode"]
@@ -390,6 +472,7 @@ class GUIController:
             self.recorder.append(self.pending_action, observation, (reward, mask, done, success))
             self.pending_action = None
             self.latest_obs = observation
+            self.training_progress["completed_steps"] = self.episode_start_step + self.env.steps
             if done:
                 self.recorder.finish(
                     auto_success=bool(success),
@@ -413,9 +496,28 @@ class GUIController:
                 raise RuntimeError("客户端与服务器轨迹长度或SHA256不一致，禁止入池")
             self._wait(lambda: self.decision is not None)
             response["review"] = copy.deepcopy(self.decision)
+        elif operation == "episode_context":
+            start, total = request["start_step"], request["total_steps"]
+            if (type(start) is not int or type(total) is not int or not 0 <= start <= total
+                    or total < 1 or self.phase == "running"):
+                raise ValueError("回合累计步数/总预算无效")
+            self.episode_start_step = start
+            self.training_progress.update(completed_steps=start, total_steps=total)
+        elif operation in {"training_control", "episode_complete"}:
+            if self.recorder and self.recorder.meta["status"] not in {"accepted", "rejected"}:
+                raise RuntimeError("先完成本条审核和准入确认，再更新/保存")
+            self.training_progress.update(request.get("progress", {}))
+            response["stop_after_episode"] = self.finish_requested
+            if operation == "episode_complete" and self.recorder:
+                self.recorder.update(training=copy.deepcopy(self.training_progress))
         elif operation == "session_complete":
             if self.recorder and self.recorder.meta["status"] not in {"accepted", "rejected"}:
                 raise RuntimeError("仍有未确认回合，不能报告会话完成")
+            final_progress = request.get("progress", {})
+            if self.finish_requested and (final_progress.get("checkpoint_step") is None
+                    or final_progress.get("checkpoint_step") != final_progress.get("completed_steps")):
+                raise RuntimeError("尚未确认本条checkpoint完整保存，不能报告正常收尾")
+            self.training_progress.update(final_progress)
             self.phase = "completed"
             self.stop_event.set()
         elif operation == "episode_ack":
@@ -449,10 +551,12 @@ class GUIController:
             self.condition.notify_all()
 
     def command(self, action, values):
-        if action in {"server_start", "server_stop", "server_status"}:
+        if action == "prepare":
+            self.prepare(values)
+        elif action in {"server_start", "server_stop", "server_status"}:
             if not self.remote_server:
                 raise ValueError("此配置未启用远程服务器管理")
-            if values and (action != "server_start" or set(values) - {"resume_run", "additional_steps"}):
+            if values and (action != "server_start" or set(values) - {"resume_run", "additional_steps", "total_steps"}):
                 raise ValueError("服务器管理不接受覆盖SSH或启动命令")
             if action == "server_stop":
                 self.stop()  # 先停止本地运动，再发远程停止请求。
@@ -481,14 +585,25 @@ class GUIController:
                     self.arm_hold.close(release=True)
         elif action == "ready":
             with self.condition:
-                if self.phase != "awaiting_reset" or self.ready:
-                    raise ValueError("当前未等待现场复位")
+                if self.phase != "awaiting_reset" or self.ready or self.finish_requested:
+                    raise ValueError("当前未等待现场复位，或已经申请保存后停止")
+                if self.config["backend"] == "piperx" and values.get("motion_confirmed") is not True:
+                    raise ValueError("请先勾选现场运动确认，再归位并开始本条")
                 self.ready = True
                 self.condition.notify_all()
         elif action == "review":
             self.submit(values.get("manual_success"), values.get("admitted"), values.get("note", ""))
         elif action == "settings":
             self.settings(values)
+        elif action == "finish_training":
+            with self.condition:
+                if self.demo:
+                    raise ValueError("模拟体验不保存模型；请使用结束本条或急停")
+                if self.phase not in {"homing", "running", "review_pending", "submitted",
+                                      "waiting_server", "awaiting_reset", "finishing"}:
+                    raise ValueError("请先完成训练准备；当前没有可正常收尾的回合")
+                self.finish_requested = True
+                self.condition.notify_all()
         elif action == "end":
             if self.phase != "running":
                 raise ValueError("当前没有正在执行的回合")
@@ -499,6 +614,7 @@ class GUIController:
             raise ValueError("未知命令")
 
     def stop(self, error=""):
+        self.preparation_cancel.set()
         with self.condition:
             error = error or (getattr(self.env, "fault_reason", "") if self.env else "")
             self.error = error

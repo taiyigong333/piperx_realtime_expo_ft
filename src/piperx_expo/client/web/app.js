@@ -30,6 +30,7 @@ class LatestFramePreview {
 
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="expo-token"]').content;
+let commandError = "";
 let current = null,
   selected = null,
   history = [],
@@ -39,7 +40,9 @@ let current = null,
   replayFrame = 0,
   polling = false;
 const phaseNames = {
-  idle: "准备就绪",
+  idle: "等待准备训练",
+  preparing: "正在启动训练服务",
+  finishing: "等待保存后停止",
   connecting: "等待学习器",
   warming: "模型预热中 · 尚未运动",
   awaiting_reset: "等待现场复位",
@@ -82,10 +85,12 @@ async function command(action, values = {}) {
       headers: { "Content-Type": "application/json", "X-Expo-Token": token },
       body: JSON.stringify(values),
     });
+    commandError = "";
     notice("");
     await poll();
     return true;
   } catch (error) {
+    commandError = error.message;
     notice(error.message, true);
     return false;
   }
@@ -125,7 +130,7 @@ $("ready").onclick = () => {
     notice("请先勾选现场预检与运动确认。", true);
     return;
   }
-  command("ready");
+  command("ready", {motion_confirmed: $("motion-confirm").checked});
 };
 $("stop").onclick = () => command("stop");
 // 即使焦点在输入框/回放页，Esc也直接请求停止，不弹确认框。
@@ -135,13 +140,20 @@ document.addEventListener("keydown", (event) => {
     command("stop");
   }
 });
-$("server-start").onclick = () => {
-  const run = $("server-training").value;
-  command("server_start", run ? {resume_run: run, additional_steps: Number($("resume-budget").value)} : {});
-};
+function trainingOptions() {
+  const values = {total_steps: Number($("resume-budget").value)};
+  if ($("server-training").value) values.resume_run = $("server-training").value;
+  return values;
+}
+$("prepare").onclick = () => command("prepare", trainingOptions());
+$("finish-training").onclick = () => command("finish_training");
+$("connect-advanced").onclick = () => command("start", {motion_confirmed: $("motion-confirm").checked});
+$("server-start").onclick = () => command("server_start", trainingOptions());
 $("server-training").onchange = () => {
-  $("resume-budget-label").hidden = !$("server-training").value;
-  $("server-start").textContent = $("server-training").value ? "继续所选训练" : "启动新训练";
+  const run = current?.remote_server?.runs?.find(run => run.id === $("server-training").value);
+  $("resume-budget").min = run ? run.step + 1 : 1;
+  if (run?.max_steps) $("resume-budget").value = Math.max(run.max_steps, run.step + 1);
+  $("prepare").textContent = run ? "准备继续所选训练" : "准备训练";
 };
 $("server-stop").onclick = () => command("server_stop");
 for (const [id, action] of [["recover-enable", "recover_enable"], ["hold-position", "hold_position"], ["home-arm", "home_arm"], ["cancel-hold", "cancel_hold"]]) {
@@ -339,21 +351,37 @@ function render(s) {
       selector.dataset.runs = signature;
       selector.onchange();
     }
-    selector.disabled = remote.busy || remote.running;
-    $("resume-budget").disabled = remote.busy || remote.running;
+    selector.disabled = remote.busy || remote.running || !s.can_start;
+    if (!$("resume-budget").value && remote.total_steps) $("resume-budget").value = remote.total_steps;
+    $("resume-budget").disabled = remote.busy || remote.running || !s.can_start;
+    $("prepare").disabled = remote.busy || remote.stopping || !s.can_start ||
+      (remote.running && training.stage === "completed");
+    $("connect-advanced").disabled = !s.can_start || !remote.running || remote.stopping || training.stage === "completed";
+    $("finish-training").disabled = s.demo || s.finish_requested ||
+      !["homing", "running", "review_pending", "submitted", "waiting_server", "awaiting_reset", "finishing"].includes(phase);
+    $("finish-training").textContent = s.finish_requested ? "已申请：审核保存后停止" : "本条保存后停止";
+    const overall = s.training_progress || {};
+    const completed = overall.completed_steps ?? remote.completed_steps ?? 0;
+    const total = overall.total_steps ?? remote.total_steps;
+    const saved = overall.checkpoint_step ?? training.checkpoint_step ?? remote.resume_step;
+    $("training-completed").textContent = completed;
+    $("training-total").textContent = total ?? "—";
+    $("training-saved").textContent = saved == null ? "尚无保存点" : `第${saved}步`;
+    $("training-progress").max = total || 1;
+    $("training-progress").value = completed;
     $("resume-hint").textContent = selector.value
-      ? "从最近完整checkpoint接续原实验、经验与更新计数；追加步数从该保存点计算。"
+      ? "从所选保存步数接续。填写训练总步数，必须大于保存步数；准备完成后仍由你确认开始。"
       : "可从列表选择历史实验。未保存模型checkpoint的实验不能恢复；停止不会额外强制保存。";
     $("server-start").disabled = remote.busy || remote.running;
     $("server-stop").disabled = remote.phase === "idle" && !remote.busy;
     $("server-hint").textContent = remote.error || training.error || (remote.mock
       ? "当前为管理链路模拟服务，不加载模型、不训练。"
-      : "先启动服务器 RL，再连接学习器并确认现场归位。停止会先锁定本机机械臂。模型初始化可能需要数分钟。");
+      : "点击准备训练后自动启动、连接并预热。准备完成后等待你确认归位并开始，不会自动运动。");
     const counters = [];
     if (training.accepted_episodes !== undefined) counters.push(training.accepted_episodes < 10
       ? `冷启动收录${training.accepted_episodes}/10条` : `收录${training.accepted_episodes}条`);
     if (training.update_count !== undefined) counters.push(`更新${training.update_count}次`);
-    if (training.checkpoint_step !== undefined) counters.push(`已保存第${training.checkpoint_step}步`);
+    if (training.checkpoint_step != null) counters.push(`已保存第${training.checkpoint_step}步`);
     $("server-run").textContent = (remote.run_name || "选择新建训练或继续已有实验") +
       (counters.length ? " · " + counters.join(" / ") : "");
     const log = remote.log_tail || "暂无日志";
@@ -383,13 +411,13 @@ function render(s) {
   $("review-badge").textContent = ep
     ? statusNames[ep.status] || ep.status
     : "等待轨迹";
-  $("start").hidden = !s.can_start || !["idle", "stopped", "fault", "completed"].includes(phase);
+  $("start").hidden = remote.enabled || !s.can_start || !["idle", "stopped", "fault", "completed"].includes(phase);
   $("start").disabled = remote.stopping || remote.phase === "stopping" ||
     (remote.enabled && !remote.running && !remote.busy);
   $("start").title = $("start").disabled ? "请先启动学习器，检查服务器状态后再连接" : "";
   $("demo").hidden = s.backend !== "mock" || phase !== "idle";
   $("ready").hidden = phase !== "awaiting_reset";
-  $("ready").disabled = !!selected;
+  $("ready").disabled = !!selected || s.finish_requested;
   $("end").hidden = phase !== "running";
   $("stop").disabled = !hold.running && !remote.running && !remote.busy && ["idle", "stopped", "fault", "completed"].includes(
     phase,
@@ -470,7 +498,9 @@ function render(s) {
             ? "等待服务器入池确认；请勿重复提交。"
             : "提交前不会写入学习器经验池。";
   const prompts = {
-    idle: ["准备开始采集", remote.enabled ? "点击启动服务器 RL，然后连接学习器；模型准备完成后会提示归位。" : "先启动复核模式服务器，再连接客户端。"],
+    idle: ["先准备训练，再决定何时开始", remote.enabled ? "选择新建或续训及总步数，点击准备训练；完成后由你单独确认归位与采集。" : "先启动复核模式服务器，再连接客户端。"],
+    preparing: ["正在准备训练服务，机械臂不会运动", "自动启动后将连接并预热；之后等待你的现场开始确认。"],
+    finishing: ["正在正常收尾", "等待审核、更新及checkpoint保存完成后退出，不会开始下一条。"],
     connecting: ["正在等待学习器", "模型准备完成后会请求创建环境。"],
     awaiting_reset: [
       "请复位方块并检查归位路径",
@@ -485,20 +515,28 @@ function render(s) {
     ],
     submitted: ["复核已提交", "等待学习器核验并确认本条经验。"],
     waiting_server: [
-      "等待学习器准备下一回合",
-      "模型更新结束后将提示现场复位。",
+      "本条已确认，正在更新与保存",
+      "完成后等待下一次人工开始；已申请收尾则保存后退出。",
     ],
     stopped: ["会话已停止", "检查现场，重新启动服务器并确认运动，再连接学习器建立新会话。"],
     fault: ["会话异常停止", "检查错误和现场状态，等待停止完成后再建立新会话。"],
     completed: [
       "本次采集与训练会话已完成",
-      "已达到学习器预算；轨迹与复核结果保留在档案中。",
+      "训练已正常结束；查看累计步数与最近保存点，可选择历史实验续训。",
     ],
   };
   const prompt = prompts[phase] || ["", ""];
   $("action-title").textContent = prompt[0];
-  $("action-hint").textContent = prompt[1];
-  if (s.error || s.camera_error) notice(s.error || s.camera_error, true);
+  $("action-hint").textContent = s.finish_requested && phase !== "completed"
+    ? (phase === "review_pending" ? "已申请保存后停止。请先完成本条人工审核；提交后会更新、保存并退出。"
+      : "已申请保存后停止：本条完成并审核后正常收尾，不会启动下一条。") : prompt[1];
+  const workflow = ["homing", "running"].includes(phase) ? "collect"
+    : phase === "awaiting_reset" ? "ready"
+    : ["review_pending", "submitted"].includes(phase) ? "review"
+    : ["waiting_server", "finishing", "completed"].includes(phase) ? "save" : "prepare";
+  document.querySelectorAll("[data-workflow]").forEach(item =>
+    item.classList.toggle("active", item.dataset.workflow === workflow));
+  if (s.error || s.camera_error || commandError) notice(s.error || s.camera_error || commandError, true);
   else if ($("notice").classList.contains("error")) notice("");
   if (!selected) {
     $("scrubber").max = ep?.steps || 0;
