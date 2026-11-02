@@ -92,9 +92,9 @@ def persist_reviewed(checkpoint_dir, prepared, review, start_step, end_step):
 class DeferredBatch:
     """采集阶段仅落盘原始经验，整轮结束才整理入池；内存只保留一条轨迹。"""
 
-    def __init__(self, checkpoint_dir):
+    def __init__(self, checkpoint_dir, *, batch_name=None):
         # 与可恢复模型经验隔离；未完成训练的采集不能冒充checkpoint覆盖的数据。
-        self.root = Path(checkpoint_dir) / "collection_batches" / uuid.uuid4().hex
+        self.root = Path(checkpoint_dir) / "collection_batches" / (batch_name or uuid.uuid4().hex)
         self.entries = []
 
     def stage(self, result, start_step, end_step):

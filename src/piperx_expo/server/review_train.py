@@ -1,4 +1,4 @@
-"""独立的浏览器复核驱动；复用固定上游模型、RTC采样和梯度更新，不修改算法源码。"""
+"""独立的浏览器/命令行复核驱动；复用固定上游模型、RTC采样和梯度更新，不修改算法源码。"""
 
 import json
 import re
@@ -66,6 +66,7 @@ def main(_):
 
     log_dir = os.path.join(FLAGS.output_dir, FLAGS.run_name)
     os.makedirs(log_dir, exist_ok=True)
+    write_json(Path(log_dir) / "experiment.json", {**experiment, "resolved_run_name": FLAGS.run_name})
     train_video_dir = os.path.join(log_dir, "train_videos")
     os.makedirs(train_video_dir, exist_ok=True)
     checkpoint_dir = os.path.join(log_dir, "checkpoints")
@@ -85,18 +86,8 @@ def main(_):
     init_wandb(checkpoint_dir_path, resuming and not inference_only, FLAGS.project_name, FLAGS.run_name)
     wandb.config.update(FLAGS.flag_values_dict(), allow_val_change=resuming)
 
-    progress.update("loading_demonstrations")
-    if FLAGS.config_task.env_type == "droid":
-        dataset = process_droid_dataset(
-            FLAGS.dataset_path,
-            FLAGS.config_task,
-            num_data=FLAGS.num_data,
-        )
-    else:
-        raise ValueError(f"Unsupported dataset type: {FLAGS.config_task.env_type}")
-    if not dataset:
-        raise ValueError(f"No demos loaded from {FLAGS.dataset_path}.")
-    example_action = dataset[0]["actions"][np.newaxis]
+    # 模型初始化只需要动作形状，经验内容推迟到训练阶段再读取。
+    example_action = np.zeros((1, 7), dtype=np.float32)
 
     model_cls = FLAGS.config.model_cls
     # BCLearner uses human-intervention chunks for the actor batch only (no critic).
@@ -128,7 +119,7 @@ def main(_):
     rb_args = dict(
         config=FLAGS.config,
         example_action=example_action,
-        capacity=max(FLAGS.max_steps + 1, 2001),
+        capacity=experiment.get("cli_batch", {}).get("replay_capacity", max(FLAGS.max_steps + 1, 2001)),
         task_description=task_description,
         replan_steps=FLAGS.replan_steps,
         seed=FLAGS.seed,
@@ -136,33 +127,20 @@ def main(_):
         critic_camera_keys=critic_camera_keys,
     )
     progress.update("building_learner")
-    replay_buffer = create_replay_buffer(**rb_args)
-    offline_replay_buffer = create_replay_buffer(**rb_args)
-
-    actor_success_only = getattr(FLAGS.config, "actor_success_only", False)
-    batch_processor = BatchProcessor(
-        replay_buffer=replay_buffer,
-        offline_replay_buffer=offline_replay_buffer,
-        data_sharding=data_sharding,
-        batch_size=FLAGS.batch_size,
-        utd_ratio=FLAGS.utd_ratio,
-        offline_ratio=FLAGS.offline_ratio,
-        actor_success_only=actor_success_only,
-        use_dagger_hil_sampling=use_dagger_hil_sampling,
-        dataset=dataset,
-    )
-
+    # 仅分配一个零值形状模板，不加载示教，也不分配完整训练经验池。
+    shape_buffer = create_replay_buffer(**{**rb_args, "capacity": 1})
     critic_example = {
-        _critic_key_to_storage(k): offline_replay_buffer.dataset_dict[_critic_key_to_storage(k)][0][
+        _critic_key_to_storage(k): np.zeros_like(shape_buffer.dataset_dict[_critic_key_to_storage(k)][0])[
             np.newaxis
         ]
         for k in critic_camera_keys
     }
-    critic_example["state"] = offline_replay_buffer.dataset_dict["state"][0][np.newaxis]
-    critic_example["actions"] = offline_replay_buffer.dataset_dict["actions"][0][np.newaxis]
+    critic_example["state"] = np.zeros_like(shape_buffer.dataset_dict["state"][0])[np.newaxis]
+    critic_example["actions"] = np.zeros_like(shape_buffer.dataset_dict["actions"][0])[np.newaxis]
     agent_example_observation, agent_example_state, agent_example_action = (
-        offline_replay_buffer.convert_to_critic_format(critic_example)
+        shape_buffer.convert_to_critic_format(critic_example)
     )
+    del shape_buffer
     actor.action_dim = agent_example_action.squeeze().shape[-1]
     actor.state_dim = agent_example_state.squeeze().shape[-1]
 
@@ -189,7 +167,7 @@ def main(_):
         edit_action_xyzg=FLAGS.config_task.edit_action_xyzg,
     )
 
-    start_step = 0
+    start_step, latest_step = 0, None
     if resuming:
         agent = restore_checkpoint(checkpoint_manager, agent, step=source["step"] if inference_only else None)
         if hasattr(agent, "cache_infer_params"):
@@ -201,8 +179,33 @@ def main(_):
         elif latest_step is not None:
             start_step = latest_step
             logging.info("Resuming from step %d", start_step)
-        if not inference_only:
+
+    batch_processor = None
+
+    def prepare_training():
+        nonlocal batch_processor
+        if batch_processor is not None:
+            return batch_processor
+        dataset = None
+        if experiment.get("load_demonstrations", True):
+            progress.update("loading_demonstrations")
+            dataset = process_droid_dataset(FLAGS.dataset_path, FLAGS.config_task, num_data=FLAGS.num_data)
+            if not dataset:
+                raise ValueError(f"No demos loaded from {FLAGS.dataset_path}.")
+        elif FLAGS.offline_ratio:
+            raise ValueError("不加载示教时offline_ratio必须为0")
+        replay_buffer = create_replay_buffer(**rb_args)
+        offline_replay_buffer = create_replay_buffer(**rb_args)
+        batch_processor = BatchProcessor(
+            replay_buffer=replay_buffer, offline_replay_buffer=offline_replay_buffer,
+            data_sharding=data_sharding, batch_size=FLAGS.batch_size, utd_ratio=FLAGS.utd_ratio,
+            offline_ratio=FLAGS.offline_ratio,
+            actor_success_only=getattr(FLAGS.config, "actor_success_only", False),
+            use_dagger_hil_sampling=use_dagger_hil_sampling, dataset=dataset,
+        )
+        if resuming and not inference_only:
             restore_reviewed(batch_processor, checkpoint_dir_path, latest_step)
+        return batch_processor
 
     sampler = AsyncChunkSampler(
         agent,
@@ -214,6 +217,8 @@ def main(_):
     if os.environ.get("PIPERX_POLICY_PREFLIGHT") == "1":
         # 完整agent仍从正式RTC权重构建，但用离线观测；不创建RPC监听或机器人环境。
         try:
+            # 显式离线预检才读取一份观测；正常rollout从机器人取首帧。
+            dataset = process_droid_dataset(FLAGS.dataset_path, FLAGS.config_task, num_data=1)
             timing = warmup_policy(
                 sampler, agent, dataset[0]["observations"],
                 samples=experiment.get("policy_warmup_samples", 3), on_stage=progress.update,
@@ -242,18 +247,21 @@ def main(_):
         env_creation_request=train_env_creation_request, host=FLAGS.client_host, port=FLAGS.client_port
     )
     response = env.client.last_response
+    if experiment.get("cli_batch") and response.get("cli_batch") is not True:
+        raise ValueError("命令行整批配置需要scripts/online.sh")
     if response.get("review_protocol") != PROTOCOL:
-        raise ValueError("此服务器只接受支持逐条复核协议的浏览器客户端")
+        raise ValueError("此服务器只接受支持逐条复核协议的GUI或命令行执行端")
     if FLAGS.update_type != "episode" or FLAGS.step_interval < 1 or FLAGS.num_updates:
         raise ValueError("复核驱动使用episode更新和step_interval，不支持其他更新触发方式")
     warmup = env.client._call_operation("prepare_policy", {
         "env_id": env.env_id, "batch_training": not inference_only,
         "session_mode": "eval" if inference_only else "train",
+        "episodes_per_batch": experiment.get("cli_batch", {}).get("episodes_per_batch"),
     })
     if inference_only and warmup.get("session_mode") != "eval":
         raise ValueError("客户端尚不支持只推理，请先更新GUI")
     if not inference_only and warmup.get("batch_training") is not True:
-        raise ValueError("客户端尚不支持整轮采集后训练，请先更新GUI再连接")
+        raise ValueError("执行端尚不支持整批采集后训练，请先更新代码再连接")
 
     def report_warmup(stage):
         progress.update(stage)
@@ -329,6 +337,44 @@ def main(_):
         checkpoint_manager.wait_until_finished()
         progress.update("saved", checkpoint_step=step)
 
+    if experiment.get("cli_batch"):
+        from piperx_expo.server.cli_loop import run_cli_batches
+
+        def train_and_save(current, processor, environment_step, updates):
+            nonlocal agent, step, update_count, last_checkpoint, combine_rng
+            agent, step = current, environment_step
+            if updates and len(processor.replay_buffer) <= FLAGS.replan_steps:
+                raise ValueError("可用经验不足RTC采样窗口；请增加每批轨迹数或启用示教")
+            progress.update("updating", env_step=step, planned_updates=updates)
+            for _ in range(updates):
+                batch, actor_batch, combine_rng = processor.next_batch(combine_rng)
+                agent = agent.replace(rng=jax.device_put(agent.rng, replicated_sharding))
+                agent, info = agent.update(agent, batch, FLAGS.utd_ratio, actor_batch)
+                jax.block_until_ready(info)
+                update_count += 1
+                wandb.log({**{f"training/{key}": value for key, value in info.items()},
+                           "training/update_count": update_count}, step=step)
+                progress.update("updating", env_step=step, update_count=update_count)
+            if step != last_checkpoint:
+                save_training_checkpoint()
+                last_checkpoint = step
+            return agent
+
+        try:
+            agent = run_cli_batches(env, sampler, agent, experiment, checkpoint_dir_path,
+                                    start_step=start_step, prepare_training=prepare_training,
+                                    train_and_save=train_and_save, on_stage=progress.update)
+            progress.update("completed", env_step=step, checkpoint_step=last_checkpoint,
+                            update_count=update_count)
+        except BaseException as error:
+            progress.update("failed", error=str(error))
+            raise
+        finally:
+            sampler.close()
+            env.client.close()
+            wandb.finish(exit_code=1 if sys.exc_info()[0] else 0)
+        return
+
     pending = DeferredBatch(checkpoint_dir)
     staged_accepted = accepted_episodes
 
@@ -358,7 +404,7 @@ def main(_):
             transitions, review = result["transitions"], result["review"]
             start = step
             step += len(transitions)
-            if len(transitions) >= replay_buffer._capacity:
+            if len(transitions) >= rb_args["capacity"]:
                 raise ValueError("单条轨迹必须短于经验池容量")
             pending.stage(result, start, step)
             staged_accepted += int(review["admitted"])
@@ -394,6 +440,7 @@ def main(_):
                 break
 
         report("processing_batch", pending_episodes=len(pending.entries))
+        batch_processor = prepare_training()
         updates = 0
         for processed, (review, count, end) in enumerate(pending.commit(batch_processor, checkpoint_dir_path), 1):
             if review["admitted"]:

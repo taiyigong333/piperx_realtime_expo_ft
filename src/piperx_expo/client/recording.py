@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -21,10 +22,11 @@ def write_json(path, value):
 
 
 class EpisodeRecorder:
-    def __init__(self, root, observation, settings):
+    def __init__(self, root, observation, settings, *, timestamp_prefix=False):
         self.lock = threading.RLock()
         self.id = uuid.uuid4().hex
-        self.folder = Path(root) / self.id
+        name = f"{datetime.now().astimezone():%Y%m%d_%H%M%S_%f}_{self.id}" if timestamp_prefix else self.id
+        self.folder = Path(root) / name
         self.folder.mkdir(parents=True)
         self.meta = {
             "id": self.id,

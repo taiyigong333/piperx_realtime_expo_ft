@@ -473,7 +473,7 @@ class GUIController:
                 self.env.config["episode_steps"] = self.config["episode_steps"]
                 self.env.config["admission_mode"] = self.config["admission_mode"]
                 self.latest_obs = observation
-                self.recorder = EpisodeRecorder(self.root, observation, copy.deepcopy(self.env.config))
+                self.recorder = self._new_recorder(observation)
                 self.pending_action = None
                 self.end_requested = False
                 self.decision = None
@@ -589,7 +589,7 @@ class GUIController:
                 if self.recorder and self.recorder.id == episode_id:
                     self.recorder.update(status=outcome)
                 else:
-                    path = self.root / episode_id / "metadata.json"
+                    path = self._episode_folder(episode_id) / "metadata.json"
                     meta = json.loads(path.read_text())
                     if meta["status"] != "queued":
                         raise RuntimeError("整批轨迹状态不一致")
@@ -600,6 +600,12 @@ class GUIController:
         else:
             raise ValueError(f"复核模式不支持操作{operation}")
         return response
+
+    def _new_recorder(self, observation):
+        return EpisodeRecorder(self.root, observation, copy.deepcopy(self.env.config))
+
+    def _episode_folder(self, episode_id):
+        return self.root / episode_id
 
     def submit(self, manual_success, admitted, note=""):
         with self.condition:

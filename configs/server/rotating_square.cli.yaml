@@ -1,0 +1,53 @@
+# 命令行整批在线RL；搭配scripts/online.sh，不启动浏览器。
+episode_review: true
+policy_warmup_samples: 3 # 运动前分别编译delay=0/RTC路径，再测3次稳定耗时。
+# 4090：已完成普通SFT的四批10000权重作为RTC-SFT起点；不能宣称已完成RTC-SFT。
+language_instruction: grab the rotating red square
+checkpoint_profile: piper_delta_right_wrist
+action_horizon: 30
+critic_camera_keys: [base_0_rgb, right_wrist_0_rgb]
+edit_action_xyzg: true # 当前启用论文模式，edit只修改XYZ与夹爪，屏蔽RPY编辑。
+dataset_path: /data/gcj_data/rl/real_time_expo_ft/data/expo_batch2345_v1
+base_weights: /data/gcj_data/fast/baseline/openpi/trained_model/checkpoints/pi05_piper_10_25_batch2345_h30_lora/pi05_lora_batch2345_h30_10k_20261025/10000/params
+# 由本配置的sft阶段产生；须先完成该阶段并确认末次step，不能用原普通SFT冒充。
+rtc_weights: /data/gcj_data/rl/real_time_expo_ft/runs/rotating_square_h30_b32_20261031_sft/checkpoints/4000/params
+eval_checkpoint_dir: /data/gcj_data/rl/real_time_expo_ft/runs/rotating_square_h30_gui_v1_rl/checkpoints
+assets_dir: /data/gcj_data/rl/real_time_expo_ft/assets
+asset_id: piperx/batch2345_h30_v1
+output_dir: /data/gcj_data/rl/real_time_expo_ft/runs
+run_name: rotating_square_h30_cli_v1
+host: 192.168.50.2
+port: 8103
+seed: 42
+control_hz: 30
+episode_steps: 200
+replan_steps: 8
+delay: 5 # 初始复用值；真实推理p95必须测量，>8步时停止并重新设计节拍。
+# RTC-SFT实测32吞吐高于16；真机RL另保留原batch，不能把离线容量结论套到critic/UTD。
+batch_size: 32
+rl_batch_size: 4
+gpu_memory_fraction: 0.95
+log_gpu_memory: true
+max_steps: 4000
+num_data: 0
+checkpoint_interval: 1000 # 上游兼容字段；GUI仅整轮采集/统一训练结束后保存一次，不按本字段逐条保存。
+offline_ratio: 0.0 # 成功示教初始化在线buffer；不是禁用离线示教。
+step_interval: 30
+wandb_finish_timeout_s: 15 # 收尾上传最多等待15秒，未上传数据保留在本地。
+wandb_mode: online
+wandb_entity: gongcj-beijing
+wandb_base_url: https://api.wandb.ai
+# 本任务独立代理；原共享7890/7891与节点选择保持不变。
+wandb_proxy_url: http://127.0.0.1:17890
+# 复用此前pi0.5训练的本机凭据；仅引用路径，不复制密钥，不提交此文件。
+wandb_env_file: /data/gcj_data/fast/baseline/openpi/.wandb_env
+cuda_visible_devices: '0'
+
+# 批次只按轨迹数触发，max_steps不作为CLI会话结束条件。
+# episode_steps=200仅为单条轨迹安全上限，不影响整批传输时机。
+cli_batch:
+  episodes_per_batch: 10
+  rounds: 3
+  updates_per_batch: 10 # 每批实际梯度更新调用数；每次仍使用原UTD。
+  replay_capacity: 10000 # 内存有界环形池，容量与采集触发解耦。
+load_demonstrations: true # 第一次整批到齐后才加载；false只用在线经验，offline_ratio须为0。

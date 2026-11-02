@@ -32,6 +32,13 @@ def validate(config, stage):
         timeout = float(config.get("wandb_finish_timeout_s", 15))
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("wandb_finish_timeout_s 必须为有限正秒数")
+    if config.get("cli_batch"):
+        from piperx_expo.server.cli_loop import batch_options
+        options = batch_options(config)
+        if stage != "rl" or not config.get("episode_review") or inference_only:
+            raise ValueError("cli_batch仅用于复核驱动的在线RL训练")
+        if options["replay_capacity"] <= config["episode_steps"]:
+            raise ValueError("replay_capacity必须大于单条安全步数上限")
     batch_size = config.get("rl_batch_size", config["batch_size"]) if stage == "rl" else config["batch_size"]
     for key in ("dataset_path", "base_weights" if stage == "sft" else "rtc_weights"):
         if not config.get(key):
@@ -227,6 +234,8 @@ def _install_rpc_contract(config):
         spec["action_mode"] = "absolute_pose_width_m"
         if config.get("episode_review", False):
             spec["review_protocol"] = "episode_review_v1"
+            if config.get("cli_batch"):
+                spec["cli_batch"] = True
         return original(self, {**request, "task_spec": spec})
 
     EnvClient.create_env = create_env
@@ -274,17 +283,27 @@ def main():
     parser.add_argument("--config", default="configs/server/experiment.yaml")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--run-name", help="指定实验名；命令行整批续训时填写原实验名，不含_rl后缀")
     parser.add_argument("--policy-preflight", action="store_true",
-                        help="仅GUI-RL：使用离线观测加载完整策略并预热/测时，不连接机器人、不更新模型")
+                        help="仅复核RL：使用离线观测加载完整策略并预热/测时，不连接机器人、不更新模型")
     args, extra = parser.parse_known_args()
     config = load_config(args.config)
+    if args.run_name:
+        if not all(char.isalnum() or char in "_-" for char in args.run_name):
+            raise ValueError("实验名只接受字母、数字、下划线和连字符")
+        config["run_name"] = args.run_name
+    if config.get("cli_batch"):
+        if args.resume and not args.run_name:
+            raise ValueError("命令行整批续训需要--run-name填写原实验名")
+        if not args.resume and not args.run_name:
+            config["run_name"] = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{config['run_name']}"
     if config.get("inference_only") and not config.get("evaluation_session_id"):
         # 命名模型可重复调用，但每次评估日志必须分开；模型路径/步数保持固定。
         config["run_name"] += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     if args.resume and config.get("inference_only"):
         raise ValueError("只推理从固定保存点读取，不使用--resume继续写入训练")
     if args.policy_preflight and (args.stage != "rl" or not config.get("episode_review")):
-        raise ValueError("policy-preflight只支持GUI-RL配置")
+        raise ValueError("policy-preflight只支持复核RL配置")
     entry = {"sft": "train_offline_rtc.py", "rl": "train_pi_robo.py", "eval": "eval_droid_policy.py"}[
         args.stage
     ]
