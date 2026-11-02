@@ -109,6 +109,89 @@ def test_stop_interrupts_home_wait():
         timer.join()
 
 
+class FakeGripper:
+    def __init__(self):
+        self.width = .0366
+        self.follow = True
+        self.stale = False
+        self.mode = "width"
+        self.commands = []
+
+    def move_gripper_m(self, width, force):
+        self.commands.append((width, force))
+        if self.follow:
+            self.width = width
+
+    def get_gripper_status(self):
+        return SimpleNamespace(timestamp=time.time() - int(self.stale), hz=100,
+                               msg=SimpleNamespace(mode=self.mode, value=self.width))
+
+
+def test_device_reset_homes_then_opens_before_observing_initial_state():
+    from piperx_expo.client.devices import PiperXDevices
+
+    device, home = device_and_home()
+    device.gripper = FakeGripper()
+    seen = []
+    device.observe = lambda: seen.append((len(device.arm.commands), len(device.gripper.commands)))
+    for _ in range(2):
+        device.gripper.width = .0366  # 上条仍夹持时，下一条也必须重新张开。
+        PiperXDevices.reset(device, confirmed=True)
+        assert device.gripper.width == home["gripper_open_width_m"]
+        assert device.arm.commands[-1] == ("mode", "p")
+        assert seen[-1] == (len(device.arm.commands), len(device.gripper.commands))
+    assert len(device.gripper.commands) == 2
+
+
+@pytest.mark.parametrize("reason", ["timeout", "stale", "mode", "cancel", "nan", "old_target"])
+def test_unconfirmed_gripper_open_prevents_reset_completion(reason):
+    from piperx_expo.client.homing import open_gripper_after_home
+
+    device, home = device_and_home()
+    device.gripper = FakeGripper()
+    home.update(gripper_open_timeout_s=.01, poll_s=.001)
+    if reason == "timeout":
+        device.gripper.follow = False
+    elif reason == "stale":
+        device.gripper.stale = True
+    elif reason == "mode":
+        device.gripper.mode = "angle"
+    elif reason == "cancel":
+        device.reset_cancel.set()
+    elif reason == "nan":
+        device.gripper.follow = False
+        device.gripper.width = np.nan
+    else:
+        stamp = time.time()
+        device.gripper.get_gripper_status = lambda: SimpleNamespace(
+            timestamp=stamp, hz=100, msg=SimpleNamespace(mode="width", value=.1))
+    with pytest.raises((RuntimeError, TimeoutError, InterruptedError)):
+        open_gripper_after_home(device, home)
+    if reason == "cancel":
+        assert not device.gripper.commands
+
+
+def test_stop_interrupts_gripper_open_without_resending_target():
+    from piperx_expo.client.homing import open_gripper_after_home
+
+    device, home = device_and_home()
+    device.gripper = FakeGripper()
+    device.gripper.follow = False
+    timer = threading.Timer(.02, device.reset_cancel.set)
+    timer.start()
+    try:
+        with pytest.raises(InterruptedError):
+            open_gripper_after_home(device, home)
+        assert len(device.gripper.commands) == 1
+    finally:
+        timer.join()
+
+
+@pytest.mark.parametrize("name,expected", [("piperx.wired.yaml", .08), ("rotating_square.calibrated.yaml", .10)])
+def test_default_open_width_respects_each_existing_client_limit(name, expected):
+    assert load_home(load_config("configs/client/" + name))["gripper_open_width_m"] == expected
+
+
 def test_environment_close_interrupts_reset_and_fault_latches():
     from piperx_expo.client.environment import PiperXEnv
 

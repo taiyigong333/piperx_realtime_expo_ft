@@ -13,7 +13,7 @@ from piperx_expo.client.gui_control import GUIController
 from piperx_expo.client.rpc import Dispatcher
 from piperx_expo.config import ROOT, load_config
 from piperx_expo.review import PROTOCOL, commit_episode, resolve_review
-from piperx_expo.server.review_loop import collect_episode, persist_reviewed, restore_reviewed
+from piperx_expo.server.review_loop import DeferredBatch, collect_episode, persist_reviewed, restore_reviewed
 from piperx_expo.server.session_control import complete_episode
 
 
@@ -97,7 +97,9 @@ def test_cli_remains_separate(tmp_path):
         ("auto", None, True, True),
     ],
 )
-def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode, manual, admitted, finish):
+@pytest.mark.parametrize("batch_training", [False, True])
+def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode, manual, admitted, finish,
+                                        batch_training):
     # 使用真实msgpack/WebSocket往返和原EnvClient，但不用模型/GPU或机器人。
     import sys
 
@@ -126,8 +128,10 @@ def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode,
             env.client = learner
             env.env_id, env.task_description = learner.create_env({})
             assert learner.last_response["review_protocol"] == PROTOCOL
-            warm = learner._call_operation("prepare_policy", {"env_id": env.env_id})
+            warm = learner._call_operation("prepare_policy", {"env_id": env.env_id,
+                                                               "batch_training": batch_training})
             assert warm["watchdog_s"] == cfg["watchdog_s"]
+            assert warm["batch_training"] is batch_training
             assert controller.recorder is None and controller.phase == "warming"
             assert controller.env.steps == 0 and not controller.env.armed
             learner._call_operation("policy_status", {"env_id": env.env_id, "details": {"stage": "ready"}})
@@ -135,18 +139,31 @@ def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode,
                                                        "start_step": 10, "total_steps": 20})
             result, _ = collect_episode(env, Sampler(), None, 8, 1000, 3)
             review, transitions = result["review"], result["transitions"]
-            prepared = commit_episode(processor, transitions, review)
-            persist_reviewed(tmp_path / "checkpoints", prepared, review, 0, 3)
+            if batch_training:
+                pending = DeferredBatch(tmp_path / "checkpoints")
+                pending.stage(result, 0, 3)
+                assert not processor.transitions
+            else:
+                prepared = commit_episode(processor, transitions, review)
+                persist_reviewed(tmp_path / "checkpoints", prepared, review, 0, 3)
             learner._call_operation(
                 "episode_ack",
                 {
                     "env_id": env.env_id,
                     "episode_id": review["episode_id"],
-                    "outcome": "accepted" if admitted else "rejected",
+                    "outcome": ("queued" if batch_training else "accepted") if admitted else "rejected",
                 },
             )
             if finish and admission_mode == "auto":
                 controller.command("finish_training", {})
+            if batch_training:
+                assert controller.recorder.meta["status"] == ("queued" if admitted else "rejected")
+                assert not processor.transitions
+                learner._call_operation("batch_status", {"env_id": env.env_id, "stage": "processing_batch"})
+                for item, _, _ in pending.commit(processor, tmp_path / "checkpoints"):
+                    learner._call_operation("batch_episode_ack", {
+                        "env_id": env.env_id, "episode_id": item["episode_id"],
+                        "outcome": "accepted" if admitted else "rejected"})
             saved = []
             ending, checkpoint = complete_episode(
                 env, step=13, total_steps=20, update_count=0, accepted_episodes=int(admitted),

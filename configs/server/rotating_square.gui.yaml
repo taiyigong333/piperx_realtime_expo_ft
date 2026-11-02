@@ -30,7 +30,7 @@ gpu_memory_fraction: 0.95
 log_gpu_memory: true
 max_steps: 4000
 num_data: 0
-checkpoint_interval: 1 # GUI每个完整回合更新后保存，便于下一次从最近保存点续训。
+checkpoint_interval: 1 # GUI复核驱动在整轮采集/统一训练结束后保存；不逐条保存完整模型。
 offline_ratio: 0.0 # 成功示教初始化在线buffer；不是禁用离线示教。
 step_interval: 30
 wandb_finish_timeout_s: 15 # 收尾上传最多等待15秒，未上传数据保留在本地。

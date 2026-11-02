@@ -1,5 +1,8 @@
 # 2026-11-01只读复制自piperx旧部署 configs/safety.yaml 的home；未做真机路径验收。
-# /home/cv/gcj/project/baseline_fast/openpi；只移动机械臂，不自动张开夹爪。
+# /home/cv/gcj/project/baseline_fast/openpi；归位到位后张开夹爪，反馈确认后才采集。
+# 默认张开到各客户端gripper_range_m上限（正式配置0.10m）；可用gripper_open_width_m显式覆盖。
+gripper_open_tolerance_m: 0.002
+gripper_open_timeout_s: 5
 joint_positions_rad: [0.0111352006, 0.8443379322, -1.0155198253, 1.1606788592, 0.0746477321, 0.0196698607]
 speed_percent: 10
 joint_tolerance_rad: 0.035

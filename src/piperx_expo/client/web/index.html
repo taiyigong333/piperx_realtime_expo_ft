@@ -59,7 +59,7 @@
               <div class="action-buttons">
                 <button id="server-refresh" class="text-button">刷新状态</button>
                 <button id="prepare" class="button primary">准备训练</button>
-                <button id="finish-training" class="button secondary" disabled>本条保存后停止</button>
+                <button id="finish-training" class="button secondary" disabled>结束采集并训练</button>
               </div>
             </div>
             <div class="server-training-options">
@@ -82,7 +82,7 @@
                 <button id="connect-advanced" class="button secondary">仅连接学习器</button>
                 <button id="server-stop" class="button danger-outline">立即结束训练服务</button>
               </div>
-              <p>正常收尾使用“本条保存后停止”；突发情况使用顶部急停。立即结束会中断当前会话。</p>
+              <p>正常收尾使用“结束采集并训练”；突发情况使用顶部急停。立即结束会中断当前会话。</p>
             </details>
             <div id="server-run" class="mono"></div>
             <details><summary>服务器日志</summary><pre id="server-log">暂无日志</pre></details>
@@ -92,7 +92,7 @@
             <li data-workflow="ready">2 · 人工确认开始</li>
             <li data-workflow="collect">3 · 归位与采集</li>
             <li data-workflow="review">4 · 判定与人工审核</li>
-            <li data-workflow="save">5 · 更新与保存</li>
+            <li data-workflow="save">5 · 整批训练与保存</li>
           </ol>
           <div class="session-strip">
             <div>
@@ -196,7 +196,7 @@
                   ><button class="button primary" id="start">
                     连接学习器 →</button
                   ><button class="button primary" id="ready" hidden>
-                    现场就绪，归位并开始 →</button
+                    现场就绪，归位、张开夹爪并开始 →</button
                   ><button class="button secondary" id="end" hidden>
                     结束本条并复核
                   </button>
@@ -338,7 +338,7 @@
                   <option value="auto">自动收录 · 使用自动判定</option>
                 </select>
                 <p class="field-help">
-                  自动收录完成后立即回传确认并入池。需要人工修正或拒收时，请提前选择逐条复核。
+                  自动收录完成后先归档，整轮结束后统一入池训练。需要人工修正或拒收时，请提前选择逐条复核。
                 </p>
                 <label for="max-steps"
                   >每条轨迹最大步数 <span>1 – 2000 步</span></label

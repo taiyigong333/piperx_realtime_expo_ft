@@ -146,13 +146,15 @@ class PiperXDevices:
         check_home_start(self, load_home(self.config))
 
     def reset(self, confirmed=False):
-        from piperx_expo.client.homing import fixed_joint_home, load_home
+        from piperx_expo.client.homing import fixed_joint_home, load_home, open_gripper_after_home
 
         # 方块由现场复位；机械臂每回合都返回同一关节目标，不使用 DROID 抛放动作。
         answer = "READY" if confirmed else input("请复位方块并确认归位路径安全，输入 READY 执行固定关节归位：")
         if answer != "READY":
             raise RuntimeError("现场复位未确认")
-        fixed_joint_home(self, load_home(self.config))
+        home = load_home(self.config)
+        fixed_joint_home(self, home)
+        open_gripper_after_home(self, home)
 
     def send(self, action):
         # 急停先置闩锁；与当前一次SDK发送串行，之后不允许任何策略目标接管。

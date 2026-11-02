@@ -13,7 +13,7 @@ from piperx_expo.client.arm_hold import ArmHold
 from piperx_expo.client.cameras import CameraStream
 from piperx_expo.client.devices import PiperXDevices
 from piperx_expo.client.environment import PiperXEnv
-from piperx_expo.client.recording import EpisodeRecorder
+from piperx_expo.client.recording import EpisodeRecorder, write_json
 from piperx_expo.client.rpc import run_client
 from piperx_expo.client.remote_server import RemoteServer
 from piperx_expo.client.safety import validate_client_config
@@ -54,6 +54,8 @@ class GUIController:
         self.decision = None
         self.end_requested = False
         self.demo = False
+        self.batch_training = False
+        self.batch_pending_ids = set()
         self.last_heartbeat = time.monotonic()
         self.remote_server = RemoteServer(self.config["remote_server"]) if self.config.get("remote_server") else None
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
@@ -150,6 +152,7 @@ class GUIController:
                 "policy_status": copy.deepcopy(self.policy_status),
                 "training_progress": copy.deepcopy(self.training_progress),
                 "finish_requested": self.finish_requested,
+                "batch_training": self.batch_training,
                 "camera_ready": camera_ok,
                 "stop_status": getattr(self.env.device, "stop_result", "") if self.env else "",
                 "camera_error": self.camera_error,
@@ -294,6 +297,8 @@ class GUIController:
                     self.training_progress = {}
                 self.policy_status = {}
                 self.decision = None
+                self.batch_training = False
+                self.batch_pending_ids.clear()
                 self.last_heartbeat = time.monotonic()
                 self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
                 self.heartbeat_thread.start()
@@ -424,7 +429,9 @@ class GUIController:
             if self.recorder is not None or self.phase not in {"connecting", "warming"}:
                 raise RuntimeError("只能在初始归位前预热模型")
             self.phase = "warming"
-            response.update(observation=self.env.get_observation(), watchdog_s=self.config["watchdog_s"])
+            self.batch_training = request.get("batch_training") is True
+            response.update(observation=self.env.get_observation(), watchdog_s=self.config["watchdog_s"],
+                            batch_training=self.batch_training)
         elif operation == "policy_status":
             if self.phase != "warming":
                 raise RuntimeError("当前未进行模型预热")
@@ -436,6 +443,7 @@ class GUIController:
                 "accepted",
                 "rejected",
                 "demo_reviewed",
+                "queued",
             }:
                 raise RuntimeError("上条轨迹尚未收到服务器确认，禁止启动下一条")
             try:
@@ -474,6 +482,7 @@ class GUIController:
             self.latest_obs = observation
             self.training_progress["completed_steps"] = self.episode_start_step + self.env.steps
             if done:
+                self.phase = "archiving"
                 self.recorder.finish(
                     auto_success=bool(success),
                     terminal_reason=(
@@ -511,6 +520,8 @@ class GUIController:
             if operation == "episode_complete" and self.recorder:
                 self.recorder.update(training=copy.deepcopy(self.training_progress))
         elif operation == "session_complete":
+            if self.batch_pending_ids:
+                raise RuntimeError("仍有未处理的整批轨迹，不能报告会话完成")
             if self.recorder and self.recorder.meta["status"] not in {"accepted", "rejected"}:
                 raise RuntimeError("仍有未确认回合，不能报告会话完成")
             final_progress = request.get("progress", {})
@@ -523,11 +534,41 @@ class GUIController:
         elif operation == "episode_ack":
             if self.phase != "submitted" or request.get("episode_id") != self.recorder.id:
                 raise RuntimeError("服务器确认与当前轨迹不匹配")
-            expected = "accepted" if self.decision["admitted"] else "rejected"
+            expected = ("queued" if self.batch_training else "accepted") if self.decision["admitted"] else "rejected"
             if request.get("outcome") != expected:
                 raise RuntimeError("服务器准入结果与人工复核不一致")
             self.recorder.update(status=expected, server_ack=request.get("details", {}))
+            if expected == "queued":
+                self.batch_pending_ids.add(self.recorder.id)
             self.phase = "waiting_server"
+        elif operation == "batch_status":
+            if not self.batch_training or (self.recorder and self.recorder.meta["status"] not in {
+                    "queued", "accepted", "rejected"}):
+                raise RuntimeError("先完成本条审核与原始轨迹归档确认，再处理整批")
+            stage = request["stage"]
+            if stage not in {"episode_queued", "processing_batch", "updating", "training_skipped", "saving"}:
+                raise ValueError("未知整批处理阶段")
+            self.training_progress.update(request.get("progress", {}), stage=stage)
+            self.phase = "waiting_server" if stage == "episode_queued" else "batch_training"
+            response["stop_after_episode"] = self.finish_requested
+        elif operation == "batch_episode_ack":
+            episode_id, outcome = request.get("episode_id"), request.get("outcome")
+            if (not self.batch_training or self.phase != "batch_training"
+                    or not isinstance(episode_id, str) or len(episode_id) != 32
+                    or any(c not in "0123456789abcdef" for c in episode_id)):
+                raise RuntimeError("整批准入确认无效")
+            if outcome == "accepted" and episode_id in self.batch_pending_ids:
+                if self.recorder and self.recorder.id == episode_id:
+                    self.recorder.update(status=outcome)
+                else:
+                    path = self.root / episode_id / "metadata.json"
+                    meta = json.loads(path.read_text())
+                    if meta["status"] != "queued":
+                        raise RuntimeError("整批轨迹状态不一致")
+                    write_json(path, {**meta, "status": outcome})
+                self.batch_pending_ids.remove(episode_id)
+            elif outcome != "rejected":
+                raise RuntimeError("整批准入确认与待处理轨迹不一致")
         else:
             raise ValueError(f"复核模式不支持操作{operation}")
         return response
@@ -599,7 +640,7 @@ class GUIController:
             with self.condition:
                 if self.demo:
                     raise ValueError("模拟体验不保存模型；请使用结束本条或急停")
-                if self.phase not in {"homing", "running", "review_pending", "submitted",
+                if self.phase not in {"homing", "running", "archiving", "review_pending", "submitted",
                                       "waiting_server", "awaiting_reset", "finishing"}:
                     raise ValueError("请先完成训练准备；当前没有可正常收尾的回合")
                 self.finish_requested = True

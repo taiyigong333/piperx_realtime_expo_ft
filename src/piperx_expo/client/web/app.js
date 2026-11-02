@@ -42,11 +42,13 @@ let current = null,
 const phaseNames = {
   idle: "等待准备训练",
   preparing: "正在启动训练服务",
-  finishing: "等待保存后停止",
+  finishing: "正在结束采集",
+  batch_training: "整批处理与训练中",
+  archiving: "正在归档本条轨迹",
   connecting: "等待学习器",
   warming: "模型预热中 · 尚未运动",
   awaiting_reset: "等待现场复位",
-  homing: "正在固定归位",
+  homing: "正在归位并张开夹爪",
   running: "正在执行",
   review_pending: "等待回合复核",
   submitted: "等待服务器确认",
@@ -59,6 +61,7 @@ const statusNames = {
   recording: "采集中",
   review_pending: "待复核",
   submitted: "已提交 · 待确认",
+  queued: "已归档 · 等待整批训练",
   accepted: "已加入经验",
   rejected: "已拒收",
   aborted: "中断归档",
@@ -330,7 +333,8 @@ function render(s) {
       warmup_boot: "预热首次推理 · 不运动", warmup_rtc: "预热RTC重规划 · 不运动",
       warmup_measure: "测量稳定推理延迟 · 不运动", ready: "预热完成",
       awaiting_reset: "等待现场归位确认", collecting: "正在采集", review_pending: "等待回合复核",
-      episode_committed: "本条处理完成", updating: "正在更新模型", saving: "正在保存checkpoint", saved: "保存完成", completed: "训练完成",
+      episode_queued: "本条已归档，等待下一条", processing_batch: "整轮采完，正在整理入池",
+      training_skipped: "未满足更新门槛，准备保存", episode_committed: "本条处理完成", updating: "正在更新模型", saving: "正在保存checkpoint", saved: "保存完成", completed: "训练完成",
     };
     $("server-phase").textContent = remote.busy ? "正在处理操作"
       : (remote.running && stages[training.stage]) || names[remote.phase] || remote.phase;
@@ -358,8 +362,8 @@ function render(s) {
       (remote.running && training.stage === "completed");
     $("connect-advanced").disabled = !s.can_start || !remote.running || remote.stopping || training.stage === "completed";
     $("finish-training").disabled = s.demo || s.finish_requested ||
-      !["homing", "running", "review_pending", "submitted", "waiting_server", "awaiting_reset", "finishing"].includes(phase);
-    $("finish-training").textContent = s.finish_requested ? "已申请：审核保存后停止" : "本条保存后停止";
+      !["homing", "running", "archiving", "review_pending", "submitted", "waiting_server", "awaiting_reset", "finishing"].includes(phase);
+    $("finish-training").textContent = s.finish_requested ? "已申请结束采集并训练" : "结束采集并训练";
     const overall = s.training_progress || {};
     const completed = overall.completed_steps ?? remote.completed_steps ?? 0;
     const total = overall.total_steps ?? remote.total_steps;
@@ -380,7 +384,9 @@ function render(s) {
     const counters = [];
     if (training.accepted_episodes !== undefined) counters.push(training.accepted_episodes < 10
       ? `冷启动收录${training.accepted_episodes}/10条` : `收录${training.accepted_episodes}条`);
-    if (training.update_count !== undefined) counters.push(`更新${training.update_count}次`);
+    if (training.pending_episodes !== undefined) counters.push(`本轮归档${training.pending_episodes}条`);
+    if (training.planned_updates !== undefined) counters.push(`本轮更新${training.completed_updates || 0}/${training.planned_updates}次`);
+    if (training.update_count !== undefined) counters.push(`累计更新${training.update_count}次`);
     if (training.checkpoint_step != null) counters.push(`已保存第${training.checkpoint_step}步`);
     $("server-run").textContent = (remote.run_name || "选择新建训练或继续已有实验") +
       (counters.length ? " · " + counters.join(" / ") : "");
@@ -488,6 +494,8 @@ function render(s) {
     auto === true ? "✓" : auto === false ? "—" : "◎";
   $("ack-hint").textContent = selected
     ? "正在回放历史档案；返回实时后可复核当前轨迹。"
+    : ep?.status === "queued"
+      ? "原始轨迹已归档；整轮采集结束后统一入池和训练。"
     : ep?.status === "accepted"
       ? "服务器已确认入池，训练使用人工优先标签。"
       : ep?.status === "rejected"
@@ -495,28 +503,30 @@ function render(s) {
         : ep?.status === "demo_reviewed"
           ? "模拟复核已保存；未连接学习器，不会训练。"
           : ep?.status === "submitted"
-            ? "等待服务器入池确认；请勿重复提交。"
+            ? "等待原始轨迹归档确认；请勿重复提交。"
             : "提交前不会写入学习器经验池。";
   const prompts = {
     idle: ["先准备训练，再决定何时开始", remote.enabled ? "选择新建或续训及总步数，点击准备训练；完成后由你单独确认归位与采集。" : "先启动复核模式服务器，再连接客户端。"],
     preparing: ["正在准备训练服务，机械臂不会运动", "自动启动后将连接并预热；之后等待你的现场开始确认。"],
-    finishing: ["正在正常收尾", "等待审核、更新及checkpoint保存完成后退出，不会开始下一条。"],
+    finishing: ["本轮采集已结束", "接下来统一整理数据、训练和保存，不会开始下一条。"],
+    archiving: ["正在归档本条原始轨迹", "等待本地写盘完成；本轮采集结束前不更新或保存完整模型。"],
+    batch_training: ["整轮采集完成，正在统一处理", "正在整理入池、按门槛训练并保存模型；请查看服务器阶段与更新次数。"],
     connecting: ["正在等待学习器", "模型准备完成后会请求创建环境。"],
     awaiting_reset: [
       "请复位方块并检查归位路径",
-      "真机会先执行固定关节归位，反馈到位后才开始下一条轨迹；归位中可停止。",
+      "真机会先固定关节归位，再张开夹爪；两者反馈确认后才开始录制和成功判定。",
     ],
     warming: ["模型正在预热，机械臂尚未运动", "首次推理和RTC重规划会分别编译；完成延迟检查后，才显示现场归位确认。"],
     running: ["正在采集轨迹", "可提前结束并复核；停止并锁定将中断本条。"],
-    homing: ["机械臂正在固定关节归位", "等待真实关节反馈到位；可随时停止并锁定。"],
+    homing: ["机械臂正在归位并张开夹爪", "先确认关节到位，再确认夹爪已张开；尚未开始录制，可随时急停。"],
     review_pending: [
       "执行完成，等待你的复核",
       "先检查自动结果，再选择最终标签与是否收录。",
     ],
     submitted: ["复核已提交", "等待学习器核验并确认本条经验。"],
     waiting_server: [
-      "本条已确认，正在更新与保存",
-      "完成后等待下一次人工开始；已申请收尾则保存后退出。",
+      "本条已归档，准备下一次采集",
+      "整轮采完后统一整理、训练和保存；每条仍等待人工确认开始。",
     ],
     stopped: ["会话已停止", "检查现场，重新启动服务器并确认运动，再连接学习器建立新会话。"],
     fault: ["会话异常停止", "检查错误和现场状态，等待停止完成后再建立新会话。"],
@@ -528,12 +538,12 @@ function render(s) {
   const prompt = prompts[phase] || ["", ""];
   $("action-title").textContent = prompt[0];
   $("action-hint").textContent = s.finish_requested && phase !== "completed"
-    ? (phase === "review_pending" ? "已申请保存后停止。请先完成本条人工审核；提交后会更新、保存并退出。"
-      : "已申请保存后停止：本条完成并审核后正常收尾，不会启动下一条。") : prompt[1];
-  const workflow = ["homing", "running"].includes(phase) ? "collect"
+    ? (phase === "review_pending" ? "已申请结束采集。请先完成本条审核；提交后统一处理整批、训练并保存。"
+      : "已申请结束采集：本条完成并审核后，整批训练并保存，不启动下一条。") : prompt[1];
+  const workflow = ["homing", "running", "archiving"].includes(phase) ? "collect"
     : phase === "awaiting_reset" ? "ready"
     : ["review_pending", "submitted"].includes(phase) ? "review"
-    : ["waiting_server", "finishing", "completed"].includes(phase) ? "save" : "prepare";
+    : ["waiting_server", "finishing", "batch_training", "completed"].includes(phase) ? "save" : "prepare";
   document.querySelectorAll("[data-workflow]").forEach(item =>
     item.classList.toggle("active", item.dataset.workflow === workflow));
   if (s.error || s.camera_error || commandError) notice(s.error || s.camera_error || commandError, true);

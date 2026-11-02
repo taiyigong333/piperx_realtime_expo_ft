@@ -30,6 +30,15 @@ def load_home(config):
     if (not np.isfinite(home["initial_joint_tolerance_rad"]) or home["initial_joint_tolerance_rad"] < 0
             or not np.isfinite(home["speed_percent"]) or not 0 < home["speed_percent"] <= 100):
         raise ValueError("归位速度/起点容差无效")
+    # 旧客户端的上限可能是0.08m，正式配置为0.10m；默认沿用各自已确认的硬件边界。
+    width = home.setdefault("gripper_open_width_m", config["gripper_range_m"][1])
+    if (not np.isfinite(width) or not config["gripper_range_m"][0] < width <= config["gripper_range_m"][1]):
+        raise ValueError("复位夹爪张开目标超出配置的米制范围")
+    for key, default in (("gripper_open_tolerance_m", .002), ("gripper_open_timeout_s", 5.0)):
+        if not np.isfinite(home.get(key, default)) or home.get(key, default) <= 0:
+            raise ValueError(f"复位 {key} 必须为有限正数")
+    if home.get("gripper_open_tolerance_m", .002) >= width:
+        raise ValueError("夹爪张开容差必须小于目标宽度，不能把闭合误报为张开")
     return home
 
 
@@ -166,3 +175,36 @@ def fixed_joint_home(device, home):
         if now >= deadline:
             raise TimeoutError(f"归位超时，最大关节误差={error:.6f}rad")
         cancel.wait(home["poll_s"])
+
+
+def open_gripper_after_home(device, home):
+    """归位后才张开，等待真实宽度到位；避免沿用上条夹持状态触发成功规则。"""
+    width = float(home.get("gripper_open_width_m", device.config["gripper_range_m"][1]))
+    tolerance = home.get("gripper_open_tolerance_m", .002)
+    timeout = home.get("gripper_open_timeout_s", 5.0)
+
+    def check_cancel():
+        if device.reset_cancel.is_set():
+            raise InterruptedError("夹爪张开已停止，禁止开始采集")
+
+    with getattr(device, "motion_lock", nullcontext()):
+        check_cancel()
+        sent_at = time.time()
+        device.gripper.move_gripper_m(width, float(device.config["gripper_force_n"]))
+    LOG.info("复位后张开夹爪，目标宽度=%.6fm", width)
+    deadline = time.monotonic() + timeout
+    while True:
+        check_cancel()
+        packet = device.gripper.get_gripper_status()
+        if (packet is None or not 0 <= time.time() - packet.timestamp < device.config["feedback_timeout_s"]
+                or packet.hz <= 0 or packet.msg.mode != "width"):
+            raise RuntimeError("夹爪张开反馈缺失、过期或不是米制宽度，禁止开始采集")
+        actual = float(packet.msg.value)
+        if not np.isfinite(actual):
+            raise RuntimeError("夹爪张开宽度无效，禁止开始采集")
+        if packet.timestamp > sent_at and abs(actual - width) <= tolerance:
+            device.observe()  # 录制初始观测之前再次确认相机与CAN反馈。
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"夹爪张开超时：实际{actual:.6f}m，目标{width:.6f}m；禁止开始采集")
+        device.reset_cancel.wait(home["poll_s"])

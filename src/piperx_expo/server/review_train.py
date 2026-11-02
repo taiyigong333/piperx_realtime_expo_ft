@@ -37,11 +37,11 @@ import openpi.training.sharding as openpi_sharding
 # 上游模块声明原有absl参数，本驱动复用参数接口和模型初始化约定。
 from train_pi_robo import FLAGS
 from piperx_expo.client.recording import write_json
-from piperx_expo.review import PROTOCOL, commit_episode
-from piperx_expo.server.review_loop import collect_episode, persist_reviewed, restore_reviewed
+from piperx_expo.review import PROTOCOL
+from piperx_expo.server.review_loop import DeferredBatch, collect_episode, restore_reviewed, update_credit
 from piperx_expo.server.policy_warmup import warmup_policy
 from piperx_expo.server.progress import TrainingProgress
-from piperx_expo.server.session_control import StopAfterEpisode, complete_episode
+from piperx_expo.server.session_control import StopAfterEpisode
 from piperx_expo.config import load_config
 
 
@@ -236,7 +236,9 @@ def main(_):
         raise ValueError("此服务器只接受支持逐条复核协议的浏览器客户端")
     if FLAGS.update_type != "episode" or FLAGS.step_interval < 1 or FLAGS.num_updates:
         raise ValueError("复核驱动使用episode更新和step_interval，不支持其他更新触发方式")
-    warmup = env.client._call_operation("prepare_policy", {"env_id": env.env_id})
+    warmup = env.client._call_operation("prepare_policy", {"env_id": env.env_id, "batch_training": True})
+    if warmup.get("batch_training") is not True:
+        raise ValueError("客户端尚不支持整轮采集后训练，请先更新GUI再连接")
 
     def report_warmup(stage):
         progress.update(stage)
@@ -297,6 +299,18 @@ def main(_):
         checkpoint_manager.wait_until_finished()
         progress.update("saved", checkpoint_step=step)
 
+    pending = DeferredBatch(checkpoint_dir)
+    staged_accepted = accepted_episodes
+
+    def report(stage, **details):
+        progress.update(stage, env_step=step, **details)
+        return env.client._call_operation("batch_status", {
+            "env_id": env.env_id, "stage": stage, "progress": {
+                "completed_steps": step, "total_steps": FLAGS.max_steps,
+                "update_count": update_count, "checkpoint_step": last_checkpoint, **details,
+            },
+        })
+
     try:
         while step < FLAGS.max_steps:
             env.client._call_operation("episode_context", {
@@ -308,7 +322,7 @@ def main(_):
                     on_stage=progress.update,
                 )
             except StopAfterEpisode:
-                # 已完成上一回合保存，用户在等待下一次人工开始时申请正常结束。
+                # 等待下一次开始时可结束本轮；随后仍须处理已审核的整批数据。
                 finish_requested = True
                 break
             transitions, review = result["transitions"], result["review"]
@@ -316,68 +330,70 @@ def main(_):
             step += len(transitions)
             if len(transitions) >= replay_buffer._capacity:
                 raise ValueError("单条轨迹必须短于经验池容量")
-            prepared = commit_episode(batch_processor, transitions, review)
-            # 保存整条已核对的轨迹目录，再返回ACK；不使用全成功示教读取器。
-            persist_reviewed(checkpoint_dir_path, prepared, review, start, step)
+            pending.stage(result, start, step)
+            staged_accepted += int(review["admitted"])
+            # 采集期ACK只确认原始轨迹已归档，不能显示为已入池/已更新模型。
             env.client._call_operation(
                 "episode_ack",
                 {
                     "env_id": env.env_id,
                     "episode_id": review["episode_id"],
-                    "outcome": "accepted" if review["admitted"] else "rejected",
+                    "outcome": "queued" if review["admitted"] else "rejected",
                     "details": {
                         "end_step": step,
-                        "transitions": len(prepared),
+                        "transitions": len(transitions) if review["admitted"] else 0,
                         "success": review["success"],
                         "durable_episode": True,
+                        "training_pending": bool(review["admitted"]),
                     },
                 },
             )
-            metrics = {
+            wandb.log({
                 "review/admitted": int(review["admitted"]),
                 "review/auto_success": int(review["auto_success"]),
                 "review/effective_success": int(review["success"]),
                 "review/manual_override": int(review["manual_success"] is not None),
                 "review/episode_steps": len(transitions),
-            }
-            if review["admitted"]:
-                accepted_episodes += 1
-                # 冷启动只计算收录回合；拒收不产生更新额度，也不触发历史额度。
-                if accepted_episodes >= 10 and step >= FLAGS.batch_size:
-                    credit += len(prepared)
-                    updates, credit = divmod(credit, FLAGS.step_interval)
-                    progress.update("updating", env_step=step, update_count=update_count,
-                                    accepted_episodes=accepted_episodes)
-                    for _ in range(updates):
-                        batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng)
-                        agent = agent.replace(rng=jax.device_put(agent.rng, replicated_sharding))
-                        agent, update_info = agent.update(agent, batch, FLAGS.utd_ratio, actor_batch)
-                        update_count += 1
-                        metrics.update({f"training/{k}": v for k, v in update_info.items()})
-            metrics.update(
-                {"review/accepted_episodes": accepted_episodes, "training/update_count": update_count}
-            )
-            progress.update("episode_committed", env_step=step, accepted_episodes=accepted_episodes,
-                            update_count=update_count, last_admitted=bool(review["admitted"]))
-            wandb.log(metrics, step=step)
-            logging.info(
-                "env_step=%d episode=%s admitted=%s success=%s updates=%d",
-                step,
-                review["episode_id"],
-                review["admitted"],
-                review["success"],
-                update_count,
-            )
-            finish_requested, last_checkpoint = complete_episode(
-                env, step=step, total_steps=FLAGS.max_steps, update_count=update_count,
-                accepted_episodes=accepted_episodes, last_checkpoint=last_checkpoint,
-                should_save=(FLAGS.checkpoint_model and FLAGS.checkpoint_interval > 0
-                             and step - (last_checkpoint or 0) >= FLAGS.checkpoint_interval),
-                save_checkpoint=save_training_checkpoint,
-            )
+            }, step=step)
+            reply = report("episode_queued", accepted_episodes=staged_accepted,
+                           pending_episodes=len(pending.entries))
+            finish_requested = bool(reply.get("stop_after_episode"))
+            # 不让已落盘的大图像仍被主循环引用；下一条只占一条回合的内存。
+            del result, transitions
             if finish_requested:
                 break
+
+        report("processing_batch", pending_episodes=len(pending.entries))
+        updates = 0
+        for processed, (review, count, end) in enumerate(pending.commit(batch_processor, checkpoint_dir_path), 1):
+            if review["admitted"]:
+                accepted_episodes += 1
+                scheduled, credit = update_credit(credit, accepted_episodes, count, end,
+                                                  FLAGS.batch_size, FLAGS.step_interval)
+                updates += scheduled
+            env.client._call_operation("batch_episode_ack", {
+                "env_id": env.env_id, "episode_id": review["episode_id"],
+                "outcome": "accepted" if review["admitted"] else "rejected",
+            })
+            report("processing_batch", accepted_episodes=accepted_episodes,
+                   processed_episodes=processed,
+                   pending_episodes=len(pending.entries))
+        report("updating" if updates else "training_skipped", accepted_episodes=accepted_episodes,
+               planned_updates=updates, skip_reason="cold_start_or_credit" if not updates else None)
+        for index in range(updates):
+            batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng)
+            agent = agent.replace(rng=jax.device_put(agent.rng, replicated_sharding))
+            agent, update_info = agent.update(agent, batch, FLAGS.utd_ratio, actor_batch)
+            # JAX异步派发必须等实际计算完成，才可报告更新计数。
+            jax.block_until_ready(update_info)
+            update_count += 1
+            wandb.log({**{f"training/{k}": v for k, v in update_info.items()},
+                       "training/update_count": update_count,
+                       "review/accepted_episodes": accepted_episodes}, step=step)
+            report("updating", accepted_episodes=accepted_episodes, planned_updates=updates,
+                   completed_updates=index + 1)
         if (FLAGS.checkpoint_model or finish_requested) and step != last_checkpoint:
+            report("saving", accepted_episodes=accepted_episodes)
             save_training_checkpoint()
             last_checkpoint = step
         progress.update("completed", env_step=step, total_steps=FLAGS.max_steps,

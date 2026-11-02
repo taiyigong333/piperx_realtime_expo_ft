@@ -4,6 +4,7 @@ import json
 import pickle
 import re
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -85,6 +86,41 @@ def persist_reviewed(checkpoint_dir, prepared, review, start_step, end_step):
             pickle.dump(prepared, file, protocol=pickle.HIGHEST_PROTOCOL)
     write_json(staging / "metadata.json", {**review, "start_step": start_step, "end_step": end_step})
     staging.rename(target)
+
+
+class DeferredBatch:
+    """采集阶段仅落盘原始经验，整轮结束才整理入池；内存只保留一条轨迹。"""
+
+    def __init__(self, checkpoint_dir):
+        # 与可恢复模型经验隔离；未完成训练的采集不能冒充checkpoint覆盖的数据。
+        self.root = Path(checkpoint_dir) / "collection_batches" / uuid.uuid4().hex
+        self.entries = []
+
+    def stage(self, result, start_step, end_step):
+        review = result["review"]
+        persist_reviewed(self.root, result["transitions"] if review["admitted"] else [],
+                         {**review, "training_pending": True}, start_step, end_step)
+        self.entries.append((review, start_step, end_step))
+
+    def commit(self, processor, checkpoint_dir):
+        for review, start, end in self.entries:
+            transitions = []
+            if review["admitted"]:
+                path = self.root / "reviewed_episodes" / review["episode_id"] / "transitions.pkl"
+                # 只读取本进程写出的文件，不接受用户上传的pickle。
+                with path.open("rb") as file:
+                    transitions = pickle.load(file)
+            prepared = commit_episode(processor, transitions, review) if transitions else []
+            persist_reviewed(checkpoint_dir, prepared, review, start, end)
+            yield review, len(prepared), end
+            del prepared, transitions
+
+
+def update_credit(credit, accepted_episodes, admitted_steps, end_step, batch_size, step_interval):
+    """保留原10条冷启动和按步更新额度；只延后执行，不为拒收/冷启动补发额度。"""
+    if accepted_episodes < 10 or end_step < batch_size:
+        return 0, credit
+    return divmod(credit + admitted_steps, step_interval)
 
 
 def restore_reviewed(processor, checkpoint_dir, up_to_step):
