@@ -125,6 +125,11 @@ def test_wire_episode_review_and_recovery(tmp_path, monkeypatch, admission_mode,
             env.client = learner
             env.env_id, env.task_description = learner.create_env({})
             assert learner.last_response["review_protocol"] == PROTOCOL
+            warm = learner._call_operation("prepare_policy", {"env_id": env.env_id})
+            assert warm["watchdog_s"] == cfg["watchdog_s"]
+            assert controller.recorder is None and controller.phase == "warming"
+            assert controller.env.steps == 0 and not controller.env.armed
+            learner._call_operation("policy_status", {"env_id": env.env_id, "details": {"stage": "ready"}})
             result, _ = collect_episode(env, Sampler(), None, 8, 1000, 3)
             review, transitions = result["review"], result["transitions"]
             prepared = commit_episode(processor, transitions, review)

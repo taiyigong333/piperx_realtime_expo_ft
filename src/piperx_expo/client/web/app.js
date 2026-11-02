@@ -41,6 +41,7 @@ let current = null,
 const phaseNames = {
   idle: "准备就绪",
   connecting: "等待学习器",
+  warming: "模型预热中 · 尚未运动",
   awaiting_reset: "等待现场复位",
   homing: "正在固定归位",
   running: "正在执行",
@@ -310,7 +311,17 @@ function render(s) {
     const names = {idle: "尚未启动", unknown: "状态未确认", loading: "模型初始化中",
       listening: s.connected ? "学习器已连接" : "可连接学习器", stopping: "正在停止", stopped: "已停止",
       completed: "训练结束", failed: "启动失败或异常退出"};
-    $("server-phase").textContent = remote.busy ? "正在处理操作" : (names[remote.phase] || remote.phase);
+    const training = remote.training || {};
+    const stages = {
+      initializing: "初始化训练", loading_demonstrations: "读取示教数据", loading_model: "加载RTC模型",
+      building_learner: "初始化强化学习器", waiting_client: "等待客户端连接",
+      warmup_boot: "预热首次推理 · 不运动", warmup_rtc: "预热RTC重规划 · 不运动",
+      warmup_measure: "测量稳定推理延迟 · 不运动", ready: "预热完成",
+      awaiting_reset: "等待现场归位确认", collecting: "正在采集", review_pending: "等待回合复核",
+      episode_committed: "本条处理完成", updating: "正在更新模型", saving: "正在保存checkpoint", saved: "保存完成", completed: "训练完成",
+    };
+    $("server-phase").textContent = remote.busy ? "正在处理操作"
+      : (remote.running && stages[training.stage]) || names[remote.phase] || remote.phase;
     const selector = $("server-training");
     const signature = JSON.stringify(remote.runs || []);
     if (selector.dataset.runs !== signature) {
@@ -335,10 +346,16 @@ function render(s) {
       : "可从列表选择历史实验。未保存模型checkpoint的实验不能恢复；停止不会额外强制保存。";
     $("server-start").disabled = remote.busy || remote.running;
     $("server-stop").disabled = remote.phase === "idle" && !remote.busy;
-    $("server-hint").textContent = remote.error || (remote.mock
+    $("server-hint").textContent = remote.error || training.error || (remote.mock
       ? "当前为管理链路模拟服务，不加载模型、不训练。"
       : "先启动服务器 RL，再连接学习器并确认现场归位。停止会先锁定本机机械臂。模型初始化可能需要数分钟。");
-    $("server-run").textContent = remote.run_name || "选择新建训练或继续已有实验";
+    const counters = [];
+    if (training.accepted_episodes !== undefined) counters.push(training.accepted_episodes < 10
+      ? `冷启动收录${training.accepted_episodes}/10条` : `收录${training.accepted_episodes}条`);
+    if (training.update_count !== undefined) counters.push(`更新${training.update_count}次`);
+    if (training.checkpoint_step !== undefined) counters.push(`已保存第${training.checkpoint_step}步`);
+    $("server-run").textContent = (remote.run_name || "选择新建训练或继续已有实验") +
+      (counters.length ? " · " + counters.join(" / ") : "");
     const log = remote.log_tail || "暂无日志";
     if ($("server-log").textContent !== log) $("server-log").textContent = log;
   }
@@ -367,7 +384,9 @@ function render(s) {
     ? statusNames[ep.status] || ep.status
     : "等待轨迹";
   $("start").hidden = !s.can_start || !["idle", "stopped", "fault", "completed"].includes(phase);
-  $("start").disabled = remote.stopping || remote.phase === "stopping";
+  $("start").disabled = remote.stopping || remote.phase === "stopping" ||
+    (remote.enabled && !remote.running && !remote.busy);
+  $("start").title = $("start").disabled ? "请先启动学习器，检查服务器状态后再连接" : "";
   $("demo").hidden = s.backend !== "mock" || phase !== "idle";
   $("ready").hidden = phase !== "awaiting_reset";
   $("ready").disabled = !!selected;
@@ -457,6 +476,7 @@ function render(s) {
       "请复位方块并检查归位路径",
       "真机会先执行固定关节归位，反馈到位后才开始下一条轨迹；归位中可停止。",
     ],
+    warming: ["模型正在预热，机械臂尚未运动", "首次推理和RTC重规划会分别编译；完成延迟检查后，才显示现场归位确认。"],
     running: ["正在采集轨迹", "可提前结束并复核；停止并锁定将中断本条。"],
     homing: ["机械臂正在固定关节归位", "等待真实关节反馈到位；可随时停止并锁定。"],
     review_pending: [

@@ -116,3 +116,19 @@ def test_nan_safety_limit_is_rejected(config):
     config["max_translation_step_m"] = float("nan")
     with pytest.raises(ValueError, match="max_translation"):
         PiperXEnv(config)
+
+
+def test_watchdog_preserves_timeout_reason_instead_of_generic_closed(config):
+    config["watchdog_s"] = 0.04
+    env = PiperXEnv(config)
+    try:
+        env.reset()
+        env.step(config["mock_initial_state"])
+        deadline = time.monotonic() + 1
+        while not env.fault and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert "动作看门狗超时" in env.fault_reason
+        with pytest.raises(RuntimeError, match="动作看门狗超时"):
+            env.step(config["mock_initial_state"])
+    finally:
+        env.close()

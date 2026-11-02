@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ class GUIController:
         self.worker = None
         self.latest_obs = None
         self.pending_action = None
+        self.policy_status = {}
         self.ready = False
         self.decision = None
         self.end_requested = False
@@ -103,6 +105,15 @@ class GUIController:
 
     def _heartbeat_watch(self):
         while not self.stop_event.wait(0.25):
+            if self.env is not None and getattr(self.env, "fault", False):
+                self.stop(getattr(self.env, "fault_reason", "") or "设备控制故障，已停止")
+                return
+            if self.remote_server and self.phase == "connecting":
+                remote = self.remote_server.snapshot()
+                if (not remote.get("busy") and not remote.get("running")
+                        and remote.get("phase") in {"stopped", "completed", "failed", "idle"}):
+                    self.stop("学习器已停止或启动失败，连接等待已结束；请检查服务器错误后重新启动")
+                    return
             if (
                 self.config["backend"] == "piperx"
                 and self.phase in {"running", "homing"}
@@ -125,6 +136,7 @@ class GUIController:
                     self.camera_error = str(error)
             return {
                 "arm_hold": self.arm_hold.snapshot() if self.arm_hold else {"running": False, "phase": "idle"},
+                "policy_status": copy.deepcopy(self.policy_status),
                 "camera_ready": camera_ok,
                 "stop_status": getattr(self.env.device, "stop_result", "") if self.env else "",
                 "camera_error": self.camera_error,
@@ -189,6 +201,8 @@ class GUIController:
                 remote = self.remote_server.snapshot()
                 if remote.get("stopping") or remote.get("phase") == "stopping":
                     raise ValueError("服务器仍在停止，请等待后再建立新会话")
+                if not remote.get("running") and not remote.get("busy"):
+                    raise ValueError("学习器尚未运行，请先启动服务器并等待模型初始化")
             if self.worker is not None and self.worker.is_alive():
                 raise ValueError("上一会话尚未退出，请等待停止完成")
             if demo and self.config["backend"] != "mock":
@@ -202,6 +216,7 @@ class GUIController:
                 self.error = ""
                 self.env = self.connection = self.recorder = self.latest_obs = self.pending_action = None
                 self.ready = self.end_requested = False
+                self.policy_status = {}
                 self.decision = None
                 self.last_heartbeat = time.monotonic()
                 self.heartbeat_thread = threading.Thread(target=self._heartbeat_watch, daemon=True)
@@ -256,6 +271,7 @@ class GUIController:
                 )
         except BaseException as error:
             if not self.stop_event.is_set():
+                logging.exception("GUI控制链失败，停止会话")
                 self.stop(str(error))
         finally:
             self.close()
@@ -305,6 +321,7 @@ class GUIController:
                 raise RuntimeError("禁止在已建立会话中重建硬件")
             if self.arm_hold:
                 self.arm_hold.close(release=self.arm_hold.snapshot()["phase"] in {"enable_sent", "enabled", "holding", "homed"})
+                self.arm_hold = None  # 交接后显示当前控制链，旧手动故障保留在日志而非继续冒充当前状态。
             device = self._device(self.config) if self.config["backend"] == "piperx" else None
             with self.condition:
                 if self.stop_event.is_set():
@@ -325,7 +342,18 @@ class GUIController:
         if self.env is None or request.get("env_id") != self.env_id:
             raise ValueError("环境ID无效")
         response = {"status": "success"}
-        if operation == "reset":
+        if operation == "prepare_policy":
+            if self.recorder is not None or self.phase not in {"connecting", "warming"}:
+                raise RuntimeError("只能在初始归位前预热模型")
+            self.phase = "warming"
+            response.update(observation=self.env.get_observation(), watchdog_s=self.config["watchdog_s"])
+        elif operation == "policy_status":
+            if self.phase != "warming":
+                raise RuntimeError("当前未进行模型预热")
+            self.policy_status = copy.deepcopy(request.get("details", {}))
+        elif operation == "reset":
+            if self.config["backend"] == "piperx" and self.policy_status.get("stage") != "ready":
+                raise RuntimeError("模型尚未完成首次/RTC预热，禁止归位和采集")
             if self.recorder and self.recorder.meta["status"] not in {
                 "accepted",
                 "rejected",
@@ -472,6 +500,7 @@ class GUIController:
 
     def stop(self, error=""):
         with self.condition:
+            error = error or (getattr(self.env, "fault_reason", "") if self.env else "")
             self.error = error
             self.phase = "fault" if error else "stopped"
             self.stop_event.set()

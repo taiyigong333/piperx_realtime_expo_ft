@@ -39,10 +39,16 @@ from train_pi_robo import FLAGS
 from piperx_expo.client.recording import write_json
 from piperx_expo.review import PROTOCOL, commit_episode
 from piperx_expo.server.review_loop import collect_episode, persist_reviewed, restore_reviewed
+from piperx_expo.server.policy_warmup import warmup_policy
+from piperx_expo.server.progress import TrainingProgress
+from piperx_expo.config import load_config
 
 
 def main(_):
     init_logging()
+    progress = TrainingProgress()
+    progress.update("initializing")
+    experiment = load_config(os.environ["PIPERX_EXPERIMENT_CONFIG"])
     assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
 
     if FLAGS.batch_size % jax.device_count() != 0:
@@ -73,6 +79,7 @@ def main(_):
     init_wandb(checkpoint_dir_path, resuming, FLAGS.project_name, FLAGS.run_name)
     wandb.config.update(FLAGS.flag_values_dict(), allow_val_change=resuming)
 
+    progress.update("loading_demonstrations")
     if FLAGS.config_task.env_type == "droid":
         dataset = process_droid_dataset(
             FLAGS.dataset_path,
@@ -100,6 +107,7 @@ def main(_):
     # Same string run_client returns as task_description, without needing the env yet.
     task_description = FLAGS.config_task.language_instruction
 
+    progress.update("loading_model")
     actor, actor_train_state, target_actor_params, agent_kwargs, vla_metadata = build_pi05(
         FLAGS.config,
         FLAGS.seed,
@@ -121,6 +129,7 @@ def main(_):
         delay=FLAGS.delay,
         critic_camera_keys=critic_camera_keys,
     )
+    progress.update("building_learner")
     replay_buffer = create_replay_buffer(**rb_args)
     offline_replay_buffer = create_replay_buffer(**rb_args)
 
@@ -186,6 +195,30 @@ def main(_):
             logging.info("Resuming from step %d", start_step)
         restore_reviewed(batch_processor, checkpoint_dir_path, latest_step)
 
+    sampler = AsyncChunkSampler(
+        agent,
+        delay=FLAGS.delay,
+        replan_steps=FLAGS.replan_steps,
+        sim_latency_ms=FLAGS.sim_latency,
+        timer=Timer(),
+    )
+    if os.environ.get("PIPERX_POLICY_PREFLIGHT") == "1":
+        # 完整agent仍从正式RTC权重构建，但用离线观测；不创建RPC监听或机器人环境。
+        try:
+            timing = warmup_policy(
+                sampler, agent, dataset[0]["observations"],
+                samples=experiment.get("policy_warmup_samples", 3), on_stage=progress.update,
+            )
+            progress.update("preflight_complete", timing=timing)
+        except BaseException as error:
+            progress.update("failed", error=str(error))
+            raise
+        finally:
+            sampler.close()
+            wandb.finish(exit_code=1 if sys.exc_info()[0] else 0)
+        return
+
+    progress.update("waiting_client")
     # The env is created only now: EnvClientWrapper blocks until the rollout client
     # dials in, and the agent build above is the slow part.
     train_env_creation_request = {
@@ -202,6 +235,34 @@ def main(_):
         raise ValueError("此服务器只接受支持逐条复核协议的浏览器客户端")
     if FLAGS.update_type != "episode" or FLAGS.step_interval < 1 or FLAGS.num_updates:
         raise ValueError("复核驱动使用episode更新和step_interval，不支持其他更新触发方式")
+    warmup = env.client._call_operation("prepare_policy", {"env_id": env.env_id})
+
+    def report_warmup(stage):
+        progress.update(stage)
+        env.client._call_operation("policy_status", {
+            "env_id": env.env_id, "details": {"stage": stage},
+        })
+
+    try:
+        timing = warmup_policy(
+            sampler, agent, warmup["observation"],
+            samples=experiment.get("policy_warmup_samples", 3), on_stage=report_warmup,
+        )
+        # 编译时间不参与门槛；预热后的完整RTC路径仍不能超过动作看门狗预算。
+        if timing["steady_max_ms"] >= float(warmup["watchdog_s"]) * 1000:
+            raise RuntimeError(f"预热后RTC推理耗时{timing['steady_max_ms']:.1f}ms超过动作看门狗预算，禁止采集")
+        progress.update("ready", timing=timing)
+        env.client._call_operation("policy_status", {
+            "env_id": env.env_id, "details": {"stage": "ready", "timing": timing},
+        })
+    except BaseException as error:
+        progress.update("failed", error=str(error))
+        logging.exception("运动前推理预热失败，禁止采集")
+        sampler.close()
+        env.client.close()
+        wandb.finish(exit_code=1)
+        raise
+
     audit_root = Path(checkpoint_dir) / "reviewed_episodes"
     accepted_episodes = sum(
         1
@@ -209,13 +270,6 @@ def main(_):
         if re.fullmatch(r"[0-9a-f]{32}", p.parent.name)
         and json.loads(p.read_text()).get("admitted")
         and json.loads(p.read_text())["end_step"] <= start_step
-    )
-    sampler = AsyncChunkSampler(
-        agent,
-        delay=FLAGS.delay,
-        replan_steps=FLAGS.replan_steps,
-        sim_latency_ms=FLAGS.sim_latency,
-        timer=Timer(),
     )
     combine_rng = jax.random.PRNGKey(FLAGS.seed + 100)
     step, credit, last_checkpoint, update_count = start_step, 0, start_step, 0
@@ -226,19 +280,25 @@ def main(_):
         state = json.loads(state_file.read_text())
         credit, update_count = state["credit"], state["update_count"]
 
+    progress.update("ready", env_step=start_step, accepted_episodes=accepted_episodes,
+                    update_count=update_count)
+
     def save_training_checkpoint():
         # 先写同step辅助状态，再提交模型；多出的辅助文件不会被当作模型checkpoint。
         write_json(
             Path(checkpoint_dir) / f"review_state_{step}.json",
             {"credit": credit, "update_count": update_count},
         )
+        progress.update("saving", env_step=step, update_count=update_count)
         save_checkpoint(checkpoint_manager, agent, step)
         checkpoint_manager.wait_until_finished()
+        progress.update("saved", checkpoint_step=step)
 
     try:
         while step < FLAGS.max_steps:
             result, agent = collect_episode(
-                env, sampler, agent, FLAGS.replan_steps, FLAGS.config_task.control_hz, FLAGS.max_steps - step
+                env, sampler, agent, FLAGS.replan_steps, FLAGS.config_task.control_hz, FLAGS.max_steps - step,
+                on_stage=progress.update,
             )
             transitions, review = result["transitions"], result["review"]
             start = step
@@ -275,6 +335,8 @@ def main(_):
                 if accepted_episodes >= 10 and step >= FLAGS.batch_size:
                     credit += len(prepared)
                     updates, credit = divmod(credit, FLAGS.step_interval)
+                    progress.update("updating", env_step=step, update_count=update_count,
+                                    accepted_episodes=accepted_episodes)
                     for _ in range(updates):
                         batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng)
                         agent = agent.replace(rng=jax.device_put(agent.rng, replicated_sharding))
@@ -284,6 +346,8 @@ def main(_):
             metrics.update(
                 {"review/accepted_episodes": accepted_episodes, "training/update_count": update_count}
             )
+            progress.update("episode_committed", env_step=step, accepted_episodes=accepted_episodes,
+                            update_count=update_count, last_admitted=bool(review["admitted"]))
             wandb.log(metrics, step=step)
             logging.info(
                 "env_step=%d episode=%s admitted=%s success=%s updates=%d",
@@ -302,8 +366,10 @@ def main(_):
                 last_checkpoint = step
         if FLAGS.checkpoint_model and step != last_checkpoint:
             save_training_checkpoint()
+        progress.update("completed", env_step=step, update_count=update_count)
         env.client._call_operation("session_complete", {"env_id": env.env_id})
-    except BaseException:
+    except BaseException as error:
+        progress.update("failed", error=str(error))
         # 先输出根因再收尾，避免上传等待或二次中断掩盖最初的客户端错误。
         logging.exception("GUI采集/训练失败，正在关闭连接与日志")
         raise

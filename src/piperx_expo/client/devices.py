@@ -107,6 +107,10 @@ class PiperXDevices:
             while True:
                 try:
                     self.read_state()
+                    packets = (self.arm.get_joint_angles(), self.arm.get_flange_pose(), self.arm.get_arm_status())
+                    if any(packet is None or packet.hz <= 0 or not
+                           0 <= time.time() - packet.timestamp < config["feedback_timeout_s"] for packet in packets):
+                        raise RuntimeError("CAN首批关节/法兰/控制器反馈尚未稳定")
                     break
                 except RuntimeError:
                     if time.monotonic() >= deadline:

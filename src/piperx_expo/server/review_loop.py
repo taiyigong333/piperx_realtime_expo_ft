@@ -13,10 +13,13 @@ from piperx_expo.client.recording import write_json
 from piperx_expo.review import EpisodeDigest, commit_episode, resolve_review
 
 
-def collect_episode(env, sampler, agent, replan_steps, control_hz, remaining_steps):
+def collect_episode(env, sampler, agent, replan_steps, control_hz, remaining_steps, *, on_stage=None):
     if remaining_steps < 1:
         raise ValueError("采集预算已耗尽")
+    on_stage = on_stage or (lambda *_: None)
+    on_stage("awaiting_reset")
     obs = env.reset()
+    on_stage("collecting")
     digest = EpisodeDigest()
     digest.observation(obs)
     transitions, plan = [], deque()
@@ -50,6 +53,7 @@ def collect_episode(env, sampler, agent, replan_steps, control_hz, remaining_ste
                 break
         # RTC后台推理此时不再需要；复核/模型更新期间不保留跨回合动作前缀。
         sampler.on_episode_end()
+        on_stage("review_pending")
         reply = env.client._call_operation(
             "review_episode", {"env_id": env.env_id, "steps": len(transitions), "digest": digest.hexdigest()}
         )

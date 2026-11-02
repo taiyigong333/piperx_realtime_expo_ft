@@ -1,5 +1,6 @@
 # 浏览器客户端专用；原h30.yaml/命令行入口保留。
 episode_review: true
+policy_warmup_samples: 3 # 运动前分别编译delay=0/RTC路径，再测3次稳定耗时。
 # 4090：已完成普通SFT的四批10000权重作为RTC-SFT起点；不能宣称已完成RTC-SFT。
 language_instruction: grab the rotating red square
 checkpoint_profile: piper_delta_right_wrist

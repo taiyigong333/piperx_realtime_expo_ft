@@ -1,6 +1,7 @@
 """本地执行环境：绝对位姿动作、任务检测和失联停止。"""
 
 import importlib
+import logging
 import threading
 import time
 import numpy as np
@@ -33,12 +34,12 @@ class PiperXEnv:
         self.device = device or (PiperXDevices(config) if self.real else MockDevices(config))
         self.lock = threading.RLock()
         self.closed = threading.Event()
-        if self.real:
-            # close先置位此事件，使归位等待能退出，避免停止按钮被控制锁阻塞30秒。
-            self.device.reset_cancel = self.closed
+        # 取消归位与环境资源关闭分开；看门狗停止不能掩盖真实故障原因。
+        self.device.reset_cancel = threading.Event()
         self.device_closed = False
         self.armed = False
         self.fault = False
+        self.fault_reason = ""
         self.steps = 0
         self.last_action = None
         self.terminal = False
@@ -50,9 +51,16 @@ class PiperXEnv:
         while not self.closed.wait(0.02):
             with self.lock:
                 if self.armed and time.monotonic() - self.last_action_time > self.config["watchdog_s"]:
-                    self.fault = True
+                    self.fault_reason = (
+                        f"动作看门狗超时：超过{self.config['watchdog_s']:.3f}秒没有新动作；"
+                        "已停止，请检查推理/重规划延迟"
+                    )
                     self.armed = False
-                    self.device.stop_hold()
+                    try:
+                        self.device.stop_hold()
+                    finally:
+                        self.fault = True
+                        logging.error(self.fault_reason)
 
     def reset(self):
         # 人工等待不能持控制锁，否则停止按钮会被复位对话阻塞。
@@ -62,14 +70,15 @@ class PiperXEnv:
             if self.closed.is_set():
                 raise RuntimeError("设备已关闭，需要重启客户端")
             if self.fault:
-                raise RuntimeError("看门狗/控制错误已停止设备，需要现场检查后重启客户端")
+                raise RuntimeError(self.fault_reason or "控制错误已停止设备，需要现场检查后重建会话")
             self.armed = False
             try:
                 if self.reset_confirm is None:
                     self.device.reset()
                 else:
                     self.device.reset(confirmed=True)
-            except BaseException:
+            except BaseException as error:
+                self.fault_reason = str(error)
                 self.fault = True
                 self.device.stop_hold()
                 raise
@@ -88,7 +97,7 @@ class PiperXEnv:
             if self.closed.is_set():
                 raise RuntimeError("设备已关闭，需要重启客户端")
             if self.fault:
-                raise RuntimeError("设备已停止，需要重启客户端")
+                raise RuntimeError(self.fault_reason or "设备已停止，需要重建会话")
             if self.terminal:
                 # 上游循环在得到终止反馈后仍会发一次 step，再启动 reset。
                 # 该动作不会进入 replay；本地保持当前位置，禁止多执行一步。
@@ -102,7 +111,8 @@ class PiperXEnv:
             try:
                 executed = validate_action(action, self.device.read_state(), self.config)
                 self.device.send(executed)
-            except BaseException:
+            except BaseException as error:
+                self.fault_reason = str(error)
                 self.fault = True
                 self.armed = False
                 self.device.stop_hold()
@@ -133,12 +143,14 @@ class PiperXEnv:
     def emergency_stop(self):
         # 不等待归位持有的环境锁，也不等待相机/网络IO，先让硬件停止。
         self.closed.set()
+        self.device.reset_cancel.set()
         self.armed = False
         self.fault = True
         self.device.stop_hold()
 
     def close(self):
         self.closed.set()
+        self.device.reset_cancel.set()
         with self.lock:
             self.armed = False
             if not self.device_closed:

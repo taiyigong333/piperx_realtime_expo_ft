@@ -14,6 +14,9 @@ from piperx_expo.config import ROOT, load_config, resolve_path
 
 def validate(config, stage):
     if config.get("episode_review"):
+        warmup_samples = config.get("policy_warmup_samples", 3)
+        if type(warmup_samples) is not int or not 1 <= warmup_samples <= 100:
+            raise ValueError("policy_warmup_samples必须为1到100整数")
         timeout = float(config.get("wandb_finish_timeout_s", 15))
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("wandb_finish_timeout_s 必须为有限正秒数")
@@ -258,8 +261,12 @@ def main():
     parser.add_argument("--config", default="configs/server/experiment.yaml")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--policy-preflight", action="store_true",
+                        help="仅GUI-RL：使用离线观测加载完整策略并预热/测时，不连接机器人、不更新模型")
     args, extra = parser.parse_known_args()
     config = load_config(args.config)
+    if args.policy_preflight and (args.stage != "rl" or not config.get("episode_review")):
+        raise ValueError("policy-preflight只支持GUI-RL配置")
     entry = {"sft": "train_offline_rtc.py", "rl": "train_pi_robo.py", "eval": "eval_droid_policy.py"}[
         args.stage
     ]
@@ -287,6 +294,7 @@ def main():
     os.environ.update(
         PIPERX_EXPERIMENT_CONFIG=str(resolve_path(args.config)),
         PIPERX_EXPO_STAGE=args.stage,
+        PIPERX_POLICY_PREFLIGHT="1" if args.policy_preflight else "0",
         CUDA_VISIBLE_DEVICES=str(config["cuda_visible_devices"]),
         WANDB_MODE=config["wandb_mode"],
         XLA_PYTHON_CLIENT_MEM_FRACTION=str(config.get("gpu_memory_fraction", 0.85)),

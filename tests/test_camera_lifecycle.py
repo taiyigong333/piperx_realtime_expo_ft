@@ -132,8 +132,15 @@ def test_shared_camera_does_not_skip_first_can_feedback_wait(monkeypatch):
         enabled_cameras=[SimpleNamespace(name=name) for name in CAMERAS])
     config_module, robot_module = ModuleType("config"), ModuleType("piper_x")
     config_module.load_config = lambda _: collection
+    packets = []
+
+    def packet():
+        packets.append(True)
+        return SimpleNamespace(timestamp=time.time(), hz=0 if len(packets) <= 3 else 30)
+
+    arm = SimpleNamespace(get_joint_angles=packet, get_flange_pose=packet, get_arm_status=packet)
     robot_module.PiperXRobot = lambda *args: SimpleNamespace(
-        start=lambda: None, stop=lambda: None, _arm=object(), _require_gripper=lambda: None)
+        start=lambda: None, stop=lambda: None, _arm=arm, _require_gripper=lambda: None)
     monkeypatch.setitem(sys.modules, "taiyi_piper_x_collect.config", config_module)
     monkeypatch.setitem(sys.modules, "taiyi_piper_x_collect.devices.piper_x", robot_module)
     attempts = []
@@ -149,6 +156,6 @@ def test_shared_camera_does_not_skip_first_can_feedback_wait(monkeypatch):
     device = PiperXDevices(load_config("configs/client/rotating_square.calibrated.yaml"),
                            cameras=SimpleNamespace(read_images=lambda: {}))
     try:
-        assert len(attempts) == 3 and not device.motion_stopped.is_set()
+        assert len(attempts) == 4 and len(packets) == 6 and not device.motion_stopped.is_set()
     finally:
         device.close(stop_motion=False)

@@ -141,7 +141,13 @@ class ServiceManager:
             with log.open("rb") as handle:
                 handle.seek(max(0, log.stat().st_size - 20000))
                 tail = handle.read(20000).decode("utf-8", errors="replace")
-        return {**record, "phase": phase, "running": running, "log_tail": tail, "runs": self.runs()}
+        progress = {}
+        try:
+            progress = json.loads((path.parent / "training_status.json").read_text())
+        except (OSError, ValueError):
+            pass
+        return {**record, "phase": phase, "running": running, "log_tail": tail,
+                "training": progress, "runs": self.runs()}
 
     def start(self, config_path, *, mock=False, resume_run=None, additional_steps=None):
         with self.lock():
@@ -253,7 +259,8 @@ class ServiceManager:
         if (folder / "stop_requested").exists():
             record.update(exit_code=130, ended_at=time.time())
         else:
-            process = subprocess.Popen(command, cwd=self.root)
+            process = subprocess.Popen(command, cwd=self.root, env={
+                **os.environ, "PIPERX_GUI_STATUS_PATH": str(folder / "training_status.json")})
             record.update(exit_code=process.wait(), ended_at=time.time())
         write_json(path, record)
 

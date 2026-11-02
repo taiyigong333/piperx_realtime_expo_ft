@@ -246,3 +246,18 @@ def test_partial_checkpoint_and_finished_budget_are_rejected(tmp_path):
     assert not manager.runs()[0]["resumable"]
     with pytest.raises(ValueError, match="提交元数据"):
         manager.resume_info(job_id)
+
+
+def test_stopped_remote_does_not_allow_infinite_connection_wait(tmp_path):
+    controller = GUIController(load_config("configs/client/gui.mock.yaml"), tmp_path)
+    controller.remote_server = SimpleNamespace(snapshot=lambda: {"running": False, "phase": "stopped"})
+    try:
+        with pytest.raises(ValueError, match="先启动服务器"):
+            controller.start()
+        controller.phase = "connecting"
+        controller.remote_server.request = lambda _: None
+        wait_for(lambda: controller.phase == "fault")
+        assert "连接等待已结束" in controller.error
+    finally:
+        controller.remote_server = None
+        controller.stop()
